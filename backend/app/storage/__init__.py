@@ -14,9 +14,13 @@ from .embedding_service import EmbeddingService, EmbeddingError
 from .ner_extractor import NERExtractor
 from .search_service import SearchService
 
+# graphiti-core is optional unless GRAPH_BACKEND=graphiti
+from .graphiti_storage import GraphitiStorage
+
 __all__ = [
     "GraphStorage",
     "Neo4jStorage",
+    "GraphitiStorage",
     "EmbeddingService",
     "EmbeddingError",
     "NERExtractor",

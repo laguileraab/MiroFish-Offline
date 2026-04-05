@@ -20,6 +20,9 @@ dependencies = [
     # Neo4j graph database driver
     "neo4j>=5.15.0",
 
+    # Graphiti temporal graph engine (use GRAPH_BACKEND=graphiti)
+    "graphiti-core>=0.28.0,<0.29",
+
     # OASIS social simulation
     "camel-oasis==0.2.5",
     "camel-ai==0.2.78",

@@ -18,6 +18,7 @@ from ..utils.logger import get_logger
 from ..models.task import TaskManager, TaskStatus
 from ..models.project import ProjectManager, ProjectStatus
 from ..utils.ingest_admin_stats import build_admin_ingest_payload
+from ..utils.ingest_counters import get_ingest_counters
 
 # Get logger
 logger = get_logger('mirofish.api')
@@ -563,8 +564,12 @@ def admin_ingest_stats():
     try:
         gid = request.args.get("graph_id") or None
         storage = _get_storage()
-        drv = getattr(storage, "driver", None)
-        payload = build_admin_ingest_payload(drv, graph_id=gid)
+        fn = getattr(storage, "build_graph_admin_ingest_payload", None)
+        if callable(fn):
+            payload = fn(get_ingest_counters().snapshot(), graph_id=gid)
+        else:
+            drv = getattr(storage, "driver", None)
+            payload = build_admin_ingest_payload(drv, graph_id=gid)
         return jsonify({"success": True, "data": payload})
     except Exception as e:
         return safe_error_response(e, 500)

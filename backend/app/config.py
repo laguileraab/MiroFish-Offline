@@ -59,6 +59,13 @@ class Config:
     NEO4J_URI = os.environ.get('NEO4J_URI', 'bolt://localhost:7687')
     NEO4J_USER = os.environ.get('NEO4J_USER', 'neo4j')
     NEO4J_PASSWORD = os.environ.get('NEO4J_PASSWORD', 'mirofish')
+    # Logical Neo4j database name (Graphiti + sync driver). Default matches Neo4j Desktop.
+    NEO4J_DATABASE = os.environ.get('NEO4J_DATABASE', 'neo4j').strip() or 'neo4j'
+
+    # Graph backend: ``neo4j`` = custom NER/RE pipeline; ``graphiti`` = graphiti-core engine
+    GRAPH_BACKEND = os.environ.get('GRAPH_BACKEND', 'neo4j').strip().lower() or 'neo4j'
+    _gmc = os.environ.get('GRAPHITI_MAX_COROUTINES', '').strip()
+    GRAPHITI_MAX_COROUTINES = int(_gmc) if _gmc else None
     NEO4J_MAX_CONNECTION_POOL_SIZE = int(os.environ.get('NEO4J_MAX_POOL_SIZE', '50'))
     NEO4J_CONNECTION_ACQUISITION_TIMEOUT = int(os.environ.get('NEO4J_ACQUISITION_TIMEOUT', '60'))
 
@@ -240,6 +247,16 @@ class Config:
         ):
             errors.append(
                 f"EMBEDDING_BASE_URL must start with http:// or https://, got: '{cls.EMBEDDING_BASE_URL}'"
+            )
+
+        if cls.GRAPH_BACKEND not in ('neo4j', 'graphiti'):
+            errors.append(
+                f"GRAPH_BACKEND must be 'neo4j' or 'graphiti', got: {cls.GRAPH_BACKEND!r}"
+            )
+        if cls.GRAPH_BACKEND == 'graphiti':
+            warnings.append(
+                "GRAPH_BACKEND=graphiti: Graphiti ingestion uses structured LLM output; "
+                "small or non–JSON-schema-capable models often fail extraction."
             )
 
         if cls.OASIS_DEFAULT_MAX_ROUNDS <= 0:

@@ -10,7 +10,7 @@ This document is the **integration plan** for replacing the custom **`Neo4jStora
 
 - **Do not** run Graphiti and the current custom ingest/search in parallel on the same logical graph (no dual-write “hybrid” of two merge/temporal models).
 - **Do** keep MiroFish orchestration: Flask, projects, chunking policy, job queue, simulations, reports, golden-set scripts, admin metrics — **calling** Graphiti for graph lifecycle, episode ingest, and search.
-- **Expect** a **new Neo4j database or dedicated Graphiti group/namespace** and **re-ingest**; the existing `Entity` / `Episode` / `RELATION` schema is not Graphiti’s native layout without a bespoke migration.
+- **Expect** **re-ingest** on a clean store: custom `Entity` / `Episode` / `RELATION` data is not Graphiti’s schema (`Entity` / `Episodic` / `RELATES_TO`, etc.). With Neo4j, Graphiti 0.28 partitions graphs by **`group_id`** on nodes/edges inside the configured **`NEO4J_DATABASE`** (default `neo4j`); MiroFish `graph_id` is passed as that `group_id`. Optional separate Neo4j databases are a deployment choice, not required by the current adapter.
 
 ---
 

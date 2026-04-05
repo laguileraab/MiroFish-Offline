@@ -2,7 +2,7 @@
 GraphStorage — abstract interface for graph storage backends.
 
 All Zep Cloud calls are replaced by this abstraction.
-Current implementation: Neo4jStorage (neo4j_storage.py).
+Implementations: ``Neo4jStorage`` (custom NER/RE), ``GraphitiStorage`` (graphiti-core) — select via ``GRAPH_BACKEND``.
 """
 
 from abc import ABC, abstractmethod

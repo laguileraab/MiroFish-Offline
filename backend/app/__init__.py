@@ -56,17 +56,28 @@ def create_app(config_class=Config):
         if should_log_startup:
             logger.info("Rate limiter initialized (%d req/min per IP)", rate_limit_rpm)
 
-    # --- Initialize Neo4jStorage singleton (DI via app.extensions) ---
-    from .storage import Neo4jStorage
+    # --- Initialize graph storage singleton (DI via app.extensions['neo4j_storage']) ---
     try:
-        neo4j_storage = Neo4jStorage()
-        app.extensions['neo4j_storage'] = neo4j_storage
-        if should_log_startup:
-            logger.info("Neo4jStorage initialized (connected to %s)", Config.NEO4J_URI)
+        if Config.GRAPH_BACKEND == "graphiti":
+            from .storage.graphiti_storage import GraphitiStorage
+
+            neo4j_storage = GraphitiStorage()
+            if should_log_startup:
+                logger.info(
+                    "GraphitiStorage initialized (Graphiti / Neo4j %s, db=%s)",
+                    Config.NEO4J_URI,
+                    Config.NEO4J_DATABASE,
+                )
+        else:
+            from .storage import Neo4jStorage
+
+            neo4j_storage = Neo4jStorage()
+            if should_log_startup:
+                logger.info("Neo4jStorage initialized (connected to %s)", Config.NEO4J_URI)
+        app.extensions["neo4j_storage"] = neo4j_storage
     except Exception as e:
-        logger.error("Neo4jStorage initialization failed: %s", e)
-        # Store None so endpoints can return 503 gracefully
-        app.extensions['neo4j_storage'] = None
+        logger.error("Graph storage initialization failed: %s", e)
+        app.extensions["neo4j_storage"] = None
 
     # Register simulation process cleanup function (ensure all simulation processes terminate on server shutdown)
     from .services.simulation_runner import SimulationRunner
