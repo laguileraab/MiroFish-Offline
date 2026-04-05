@@ -412,7 +412,9 @@ class GraphToolsService:
         graph_id: str,
         query: str,
         limit: int = 10,
-        scope: str = "edges"
+        scope: str = "edges",
+        as_of: Optional[str] = None,
+        include_invalid_relations: bool = False,
     ) -> SearchResult:
         """
         Graph semantic search (hybrid: vector + BM25 via Neo4j)
@@ -422,6 +424,8 @@ class GraphToolsService:
             query: Search query
             limit: Number of results to return
             scope: Search scope, "edges" or "nodes" or "both"
+            as_of: Optional ISO-8601 instant for temporal graphs (overrides GRAPH_QUERY_AS_OF_ISO when set)
+            include_invalid_relations: When true, return invalidated edges as well (temporal mode)
 
         Returns:
             SearchResult
@@ -434,6 +438,8 @@ class GraphToolsService:
                 query=query,
                 limit=limit,
                 scope=scope,
+                as_of=as_of,
+                include_invalid_relations=include_invalid_relations,
             )
 
             facts = []
@@ -493,14 +499,23 @@ class GraphToolsService:
 
         except Exception as e:
             logger.warning(f"Graph search failed, degrading to local search: {str(e)}")
-            return self._local_search(graph_id, query, limit, scope)
+            return self._local_search(
+                graph_id,
+                query,
+                limit,
+                scope,
+                as_of=as_of,
+                include_invalid_relations=include_invalid_relations,
+            )
 
     def _local_search(
         self,
         graph_id: str,
         query: str,
         limit: int = 10,
-        scope: str = "edges"
+        scope: str = "edges",
+        as_of: Optional[str] = None,
+        include_invalid_relations: bool = False,
     ) -> SearchResult:
         """
         Local keyword matching search (fallback approach)
@@ -528,7 +543,11 @@ class GraphToolsService:
 
         try:
             if scope in ["edges", "both"]:
-                all_edges = self.storage.get_all_edges(graph_id)
+                all_edges = self.storage.get_all_edges(
+                    graph_id,
+                    as_of=as_of,
+                    include_invalid_relations=include_invalid_relations,
+                )
                 scored_edges = []
                 for edge in all_edges:
                     score = match_score(edge.get("fact", "")) + match_score(edge.get("name", ""))
@@ -602,11 +621,21 @@ class GraphToolsService:
         logger.info(f"Retrieved {len(result)} nodes")
         return result
 
-    def get_all_edges(self, graph_id: str, include_temporal: bool = True) -> List[EdgeInfo]:
+    def get_all_edges(
+        self,
+        graph_id: str,
+        include_temporal: bool = True,
+        as_of: Optional[str] = None,
+        include_invalid_relations: bool = False,
+    ) -> List[EdgeInfo]:
         """Get all edges in the graph (with temporal information)"""
         logger.info(f"Getting all edges in graph {graph_id}...")
 
-        raw_edges = self.storage.get_all_edges(graph_id)
+        raw_edges = self.storage.get_all_edges(
+            graph_id,
+            as_of=as_of,
+            include_invalid_relations=include_invalid_relations,
+        )
 
         result = []
         for edge in raw_edges:
@@ -649,7 +678,13 @@ class GraphToolsService:
             logger.error(f"Failed to get node details: {str(e)}")
             return None
 
-    def get_node_edges(self, graph_id: str, node_uuid: str) -> List[EdgeInfo]:
+    def get_node_edges(
+        self,
+        graph_id: str,
+        node_uuid: str,
+        as_of: Optional[str] = None,
+        include_invalid_relations: bool = False,
+    ) -> List[EdgeInfo]:
         """
         Get all edges related to a node
 
@@ -659,7 +694,11 @@ class GraphToolsService:
         logger.info(f"Getting edges related to node {node_uuid[:8]}...")
 
         try:
-            raw_edges = self.storage.get_node_edges(node_uuid)
+            raw_edges = self.storage.get_node_edges(
+                node_uuid,
+                as_of=as_of,
+                include_invalid_relations=include_invalid_relations,
+            )
 
             result = []
             for edge in raw_edges:

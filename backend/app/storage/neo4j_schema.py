@@ -2,6 +2,12 @@
 Neo4j Schema — Cypher queries for index creation and schema management.
 
 Called by Neo4jStorage.create_graph() to set up vector + fulltext indexes.
+
+Runtime edges (no index required here):
+  (:Episode)-[:MENTIONS]->(:Entity)  — chunk ingest provenance (Phase 10).
+
+RELATION properties:
+  fact_normalized — normalized fact string for dedupe (Phase 11).
 """
 
 # Constraints

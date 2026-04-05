@@ -17,6 +17,7 @@ from ..utils.file_parser import FileParser
 from ..utils.logger import get_logger
 from ..models.task import TaskManager, TaskStatus
 from ..models.project import ProjectManager, ProjectStatus
+from ..utils.ingest_admin_stats import build_admin_ingest_payload
 
 # Get logger
 logger = get_logger('mirofish.api')
@@ -366,7 +367,13 @@ def build_graph():
 
         # Create async task
         task_manager = TaskManager()
-        task_id = task_manager.create_task(f"Build graph: {graph_name}")
+        task_id = task_manager.create_task(
+            "graph_build",
+            metadata={
+                "graph_name": graph_name,
+                "project_id": project_id,
+            },
+        )
         logger.info(f"Graph build task created: task_id={task_id}, project_id={project_id}")
         
         # Update project status
@@ -421,14 +428,13 @@ def build_graph():
                 )
                 builder.set_ontology(graph_id, ontology)
                 
-                # Add text (progress_callback signature is (msg, progress_ratio))
-                def add_progress_callback(msg, progress_ratio):
+                # Add text (progress_callback: msg, progress_ratio, optional progress_detail)
+                def add_progress_callback(msg, progress_ratio, detail=None):
                     progress = 15 + int(progress_ratio * 40)  # 15% - 55%
-                    task_manager.update_task(
-                        task_id,
-                        message=msg,
-                        progress=progress
-                    )
+                    ukw: dict = {"message": msg, "progress": progress}
+                    if detail is not None:
+                        ukw["progress_detail"] = detail
+                    task_manager.update_task(task_id, **ukw)
 
                 task_manager.update_task(
                     task_id,
@@ -439,7 +445,7 @@ def build_graph():
                 episode_uuids = builder.add_text_batches(
                     graph_id,
                     chunks,
-                    batch_size=3,
+                    batch_size=Config.GRAPH_INGEST_BATCH_SIZE,
                     progress_callback=add_progress_callback
                 )
 
@@ -541,11 +547,106 @@ def list_tasks():
     List all tasks
     """
     tasks = TaskManager().list_tasks()
-    
+
     return jsonify({
         "success": True,
-        "data": [t.to_dict() for t in tasks],
+        "data": tasks,
         "count": len(tasks)
+    })
+
+
+@graph_bp.route('/admin/ingest-stats', methods=['GET'])
+def admin_ingest_stats():
+    """
+    Phase 14 TASK-048 — process ingest counters + Neo4j episode rollup (optional graph_id filter).
+    """
+    try:
+        gid = request.args.get("graph_id") or None
+        storage = _get_storage()
+        drv = getattr(storage, "driver", None)
+        payload = build_admin_ingest_payload(drv, graph_id=gid)
+        return jsonify({"success": True, "data": payload})
+    except Exception as e:
+        return safe_error_response(e, 500)
+
+
+@graph_bp.route('/jobs/chunks', methods=['POST'])
+def enqueue_chunk_ingest():
+    """
+    Phase 14 TASK-046 — enqueue raw text chunks onto an existing graph (async task + poll /task/<id>).
+    JSON: { "graph_id": "...", "chunks": ["...", ...], "batch_size": optional int }
+    """
+    data = request.get_json(silent=True) or {}
+    graph_id = (data.get("graph_id") or "").strip()
+    chunks = data.get("chunks")
+    if not graph_id or not isinstance(chunks, list) or not chunks:
+        return jsonify({
+            "success": False,
+            "error": "graph_id and non-empty chunks[] are required",
+        }), 400
+    str_chunks = [c for c in chunks if isinstance(c, str) and c.strip()]
+    if not str_chunks:
+        return jsonify({
+            "success": False,
+            "error": "chunks must contain non-empty strings",
+        }), 400
+
+    batch_size = data.get("batch_size")
+    if batch_size is not None:
+        try:
+            batch_size = int(batch_size)
+        except (TypeError, ValueError):
+            return jsonify({"success": False, "error": "batch_size must be an integer"}), 400
+
+    storage = _get_storage()
+    task_manager = TaskManager()
+    task_id = task_manager.create_task(
+        "graph_chunk_ingest",
+        metadata={"graph_id": graph_id, "chunk_count": len(str_chunks)},
+    )
+
+    def worker():
+        log = get_logger("mirofish.graph_jobs")
+        try:
+            task_manager.update_task(
+                task_id,
+                status=TaskStatus.PROCESSING,
+                message="Starting chunk ingest...",
+                progress=5,
+            )
+            builder = GraphBuilderService(storage=storage)
+
+            def cb(msg, prog, detail=None):
+                ukw = {
+                    "message": msg,
+                    "progress": 5 + int(float(prog) * 90),
+                }
+                if detail is not None:
+                    ukw["progress_detail"] = detail
+                task_manager.update_task(task_id, **ukw)
+
+            eps = builder.add_text_batches(
+                graph_id,
+                str_chunks,
+                batch_size=batch_size,
+                progress_callback=cb,
+            )
+            task_manager.complete_task(
+                task_id,
+                {"graph_id": graph_id, "episode_ids": eps, "chunk_count": len(str_chunks)},
+            )
+            log.info("Chunk ingest job %s completed: %s episodes", task_id, len(eps))
+        except Exception as e:
+            log.exception("Chunk ingest job %s failed", task_id)
+            task_manager.fail_task(task_id, f"{e}\n{traceback.format_exc()}")
+
+    threading.Thread(target=worker, daemon=True).start()
+    return jsonify({
+        "success": True,
+        "data": {
+            "task_id": task_id,
+            "message": "Ingest started. Poll GET /task/<task_id>",
+        },
     })
 
 

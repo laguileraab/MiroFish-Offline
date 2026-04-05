@@ -39,6 +39,12 @@ def create_app(config_class=Config):
         logger.info("MiroFish-Offline Backend starting...")
         logger.info("=" * 50)
 
+    cfg_errors, cfg_warnings = Config.validate()
+    for w in cfg_warnings:
+        logger.warning("Config: %s", w)
+    for e in cfg_errors:
+        logger.error("Config: %s", e)
+
     # Enable CORS
     CORS(app, resources={r"/api/*": {"origins": "*"}})
 

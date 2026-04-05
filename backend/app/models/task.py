@@ -1,14 +1,21 @@
 """
 Task Status Management
 Tracks long-running tasks (like graph building)
+
+Phase 14 — optional disk persistence (GRAPH_JOB_PERSIST_DIR) for poll-after-restart.
 """
 
+import json
+import logging
+import os
 import uuid
 import threading
 from datetime import datetime
 from enum import Enum
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List
 from dataclasses import dataclass, field
+
+logger = logging.getLogger("mirofish.task")
 
 
 class TaskStatus(str, Enum):
@@ -50,6 +57,28 @@ class Task:
             "metadata": self.metadata,
         }
 
+    @staticmethod
+    def from_dict(data: Dict[str, Any]) -> "Task":
+        """Rehydrate from ``to_dict`` / JSON snapshot."""
+        def _parse_dt(s: str) -> datetime:
+            if s.endswith("Z"):
+                s = s[:-1] + "+00:00"
+            return datetime.fromisoformat(s)
+
+        return Task(
+            task_id=data["task_id"],
+            task_type=data["task_type"],
+            status=TaskStatus(data["status"]),
+            created_at=_parse_dt(data["created_at"]),
+            updated_at=_parse_dt(data["updated_at"]),
+            progress=int(data.get("progress", 0)),
+            message=str(data.get("message", "")),
+            result=data.get("result"),
+            error=data.get("error"),
+            metadata=dict(data.get("metadata") or {}),
+            progress_detail=dict(data.get("progress_detail") or {}),
+        )
+
 
 class TaskManager:
     """
@@ -69,6 +98,40 @@ class TaskManager:
                     cls._instance._tasks: Dict[str, Task] = {}
                     cls._instance._task_lock = threading.Lock()
         return cls._instance
+
+    def _persist_base(self) -> str:
+        from ..config import Config
+
+        return (Config.GRAPH_JOB_PERSIST_DIR or "").strip()
+
+    def _persist_path(self, task_id: str) -> Optional[str]:
+        base = self._persist_base()
+        if not base:
+            return None
+        return os.path.join(base, f"{task_id}.json")
+
+    def _persist_snapshot(self, task: Task) -> None:
+        path = self._persist_path(task.task_id)
+        if not path:
+            return
+        try:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(task.to_dict(), f, ensure_ascii=False, indent=2)
+        except OSError as e:
+            logger.warning("Could not persist task %s: %s", task.task_id, e)
+
+    def _load_from_disk(self, task_id: str) -> Optional[Task]:
+        path = self._persist_path(task_id)
+        if not path or not os.path.isfile(path):
+            return None
+        try:
+            with open(path, encoding="utf-8") as f:
+                data = json.load(f)
+            return Task.from_dict(data)
+        except (OSError, json.JSONDecodeError, KeyError, ValueError) as e:
+            logger.warning("Could not load task %s from disk: %s", task_id, e)
+            return None
 
     def create_task(self, task_type: str, metadata: Optional[Dict] = None) -> str:
         """
@@ -96,6 +159,8 @@ class TaskManager:
         with self._task_lock:
             self._tasks[task_id] = task
 
+        self._persist_snapshot(task)
+
         # Periodic memory-bound cleanup of finished tasks (fork pattern: short TTL)
         created = getattr(self, "_tasks_created_count", 0) + 1
         self._tasks_created_count = created
@@ -105,8 +170,17 @@ class TaskManager:
         return task_id
 
     def get_task(self, task_id: str) -> Optional[Task]:
-        """Get task"""
+        """Get task (memory, then optional disk snapshot)."""
         with self._task_lock:
+            t = self._tasks.get(task_id)
+        if t is not None:
+            return t
+        loaded = self._load_from_disk(task_id)
+        if loaded is None:
+            return None
+        with self._task_lock:
+            if task_id not in self._tasks:
+                self._tasks[task_id] = loaded
             return self._tasks.get(task_id)
 
     def update_task(
@@ -131,6 +205,7 @@ class TaskManager:
             error: Error message
             progress_detail: Detailed progress information
         """
+        task_copy: Optional[Task] = None
         with self._task_lock:
             task = self._tasks.get(task_id)
             if task:
@@ -147,6 +222,9 @@ class TaskManager:
                     task.error = error
                 if progress_detail is not None:
                     task.progress_detail = progress_detail
+                task_copy = task
+        if task_copy is not None:
+            self._persist_snapshot(task_copy)
 
     def complete_task(self, task_id: str, result: Dict):
         """Mark task as completed"""
@@ -167,8 +245,8 @@ class TaskManager:
             error=error
         )
 
-    def list_tasks(self, task_type: Optional[str] = None) -> list:
-        """List tasks"""
+    def list_tasks(self, task_type: Optional[str] = None) -> List[Dict[str, Any]]:
+        """List tasks currently in memory."""
         with self._task_lock:
             tasks = list(self._tasks.values())
             if task_type:
@@ -187,4 +265,9 @@ class TaskManager:
             ]
             for tid in old_ids:
                 del self._tasks[tid]
-
+                p = self._persist_path(tid)
+                if p and os.path.isfile(p):
+                    try:
+                        os.remove(p)
+                    except OSError:
+                        pass

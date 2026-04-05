@@ -1,0 +1,40 @@
+{
+  "entity_types": [
+    {
+      "name": "Organization",
+      "description": "Company, agency, or institution"
+    },
+    {
+      "name": "Person",
+      "description": "Named individual"
+    },
+    {
+      "name": "Product",
+      "description": "Product or service name"
+    },
+    {
+      "name": "Policy",
+      "description": "Rule, requirement, or guideline"
+    }
+  ],
+  "relation_types": [
+    {
+      "name": "OWNS",
+      "description": "Ownership or control",
+      "source_targets": [{ "source": "Organization", "target": "Product" }]
+    },
+    {
+      "name": "WORKS_AT",
+      "description": "Employment or affiliation",
+      "source_targets": [{ "source": "Person", "target": "Organization" }]
+    },
+    {
+      "name": "REQUIRES",
+      "description": "Policy requires something of an organization or product",
+      "source_targets": [
+        { "source": "Policy", "target": "Organization" },
+        { "source": "Policy", "target": "Product" }
+      ]
+    }
+  ]
+}

@@ -73,7 +73,12 @@ class GraphStorage(ABC):
         """Get a single node by UUID."""
 
     @abstractmethod
-    def get_node_edges(self, node_uuid: str) -> List[Dict[str, Any]]:
+    def get_node_edges(
+        self,
+        node_uuid: str,
+        as_of: Optional[str] = None,
+        include_invalid_relations: bool = False,
+    ) -> List[Dict[str, Any]]:
         """Get all edges connected to a node (O(1) via Cypher, not full scan)."""
 
     @abstractmethod
@@ -83,7 +88,12 @@ class GraphStorage(ABC):
     # --- Read edges ---
 
     @abstractmethod
-    def get_all_edges(self, graph_id: str) -> List[Dict[str, Any]]:
+    def get_all_edges(
+        self,
+        graph_id: str,
+        as_of: Optional[str] = None,
+        include_invalid_relations: bool = False,
+    ) -> List[Dict[str, Any]]:
         """Get all edges in a graph."""
 
     # --- Search ---
@@ -95,6 +105,8 @@ class GraphStorage(ABC):
         query: str,
         limit: int = 10,
         scope: str = "edges",
+        as_of: Optional[str] = None,
+        include_invalid_relations: bool = False,
     ):
         """
         Hybrid search (vector + keyword) over graph data.
@@ -104,6 +116,8 @@ class GraphStorage(ABC):
             query: Search query text
             limit: Max results
             scope: "edges", "nodes", or "both"
+            as_of: Optional ISO-8601 instant for temporal edge filtering (Neo4j implementation)
+            include_invalid_relations: Include invalidated edges when temporal mode is on
 
         Returns:
             Dict with 'edges' and/or 'nodes' lists (wrapped by GraphToolsService into SearchResult)
@@ -116,7 +130,12 @@ class GraphStorage(ABC):
         """Get graph metadata (node count, edge count, entity types)."""
 
     @abstractmethod
-    def get_graph_data(self, graph_id: str) -> Dict[str, Any]:
+    def get_graph_data(
+        self,
+        graph_id: str,
+        as_of: Optional[str] = None,
+        include_invalid_relations: bool = False,
+    ) -> Dict[str, Any]:
         """
         Get full graph data (enriched format for frontend).
 

@@ -3,6 +3,7 @@ Text extraction and chunking helpers for graph ingestion.
 """
 
 from typing import List
+from ..config import Config
 from ..utils.file_parser import FileParser, split_text_into_chunks
 
 
@@ -31,7 +32,12 @@ class TextProcessor:
         Returns:
             Text chunk list
         """
-        return split_text_into_chunks(text, chunk_size, overlap)
+        return split_text_into_chunks(
+            text,
+            chunk_size,
+            overlap,
+            prefer_paragraph_boundary=Config.GRAPH_CHUNK_PREFER_PARAGRAPH,
+        )
     
     @staticmethod
     def preprocess_text(text: str) -> str:

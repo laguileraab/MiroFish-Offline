@@ -14,6 +14,45 @@ from openai import OpenAI
 from ..config import Config
 
 
+def _repair_json_loose(s: str) -> str:
+    """Strip trailing commas before } or ] (common LLM JSON glitches)."""
+    s = s.strip()
+    s = re.sub(r",\s*}", "}", s)
+    s = re.sub(r",\s*]", "]", s)
+    return s
+
+
+def _extract_top_level_json_object(s: str) -> Optional[str]:
+    """Find first `{` … `}` slice with string-aware brace matching."""
+    start = s.find("{")
+    if start < 0:
+        return None
+    depth = 0
+    in_str = False
+    esc = False
+    quote = ""
+    for i in range(start, len(s)):
+        c = s[i]
+        if in_str:
+            if esc:
+                esc = False
+            elif c == "\\":
+                esc = True
+            elif c == quote:
+                in_str = False
+        else:
+            if c in "\"'":
+                in_str = True
+                quote = c
+            elif c == "{":
+                depth += 1
+            elif c == "}":
+                depth -= 1
+                if depth == 0:
+                    return s[start : i + 1]
+    return None
+
+
 class LLMClient:
     """LLM Client"""
 
@@ -23,6 +62,7 @@ class LLMClient:
         base_url: Optional[str] = None,
         model: Optional[str] = None,
         timeout: Optional[float] = None,
+        num_ctx: Optional[int] = None,
     ):
         self.api_key = api_key or Config.LLM_API_KEY
         self.base_url = base_url or Config.LLM_BASE_URL
@@ -38,9 +78,15 @@ class LLMClient:
             timeout=effective_timeout,
         )
 
-        # Ollama context window size — prevents prompt truncation.
-        # Read from env OLLAMA_NUM_CTX, default 8192 (Ollama default is only 2048).
-        self._num_ctx = int(os.environ.get('OLLAMA_NUM_CTX', '8192'))
+        # Ollama context window — pass explicit num_ctx for extract-only clients (Phase 9).
+        if num_ctx is not None:
+            self._num_ctx = num_ctx
+        else:
+            self._num_ctx = int(os.environ.get("OLLAMA_NUM_CTX", "8192"))
+
+        # Set after each successful chat.completions.create (Phase 8 ingest metrics).
+        self.last_usage: Optional[Dict[str, Optional[int]]] = None
+        self.last_finish_reason: Optional[str] = None
 
     def _is_ollama(self) -> bool:
         """
@@ -96,6 +142,8 @@ class LLMClient:
                 "options": {"num_ctx": self._num_ctx}
             }
 
+        self.last_usage = None
+        self.last_finish_reason = None
         try:
             response = self.client.chat.completions.create(**kwargs)
         except Exception as first_err:
@@ -108,10 +156,28 @@ class LLMClient:
                     raise first_err from None
             else:
                 raise first_err
+        self._capture_response_meta(response)
         content = response.choices[0].message.content
         # Some models (like MiniMax M2.5) include <think>thinking content in response, need to remove
         content = re.sub(r'<think>[\s\S]*?</think>', '', content).strip()
         return content
+
+    def _capture_response_meta(self, response: Any) -> None:
+        """Store usage / finish_reason for ingest logging (best-effort)."""
+        try:
+            choice = response.choices[0]
+            self.last_finish_reason = getattr(choice, "finish_reason", None)
+        except (IndexError, AttributeError):
+            self.last_finish_reason = None
+        u = getattr(response, "usage", None)
+        if u is None:
+            self.last_usage = None
+            return
+        self.last_usage = {
+            "prompt_tokens": getattr(u, "prompt_tokens", None),
+            "completion_tokens": getattr(u, "completion_tokens", None),
+            "total_tokens": getattr(u, "total_tokens", None),
+        }
 
     def chat_json(
         self,
@@ -142,7 +208,27 @@ class LLMClient:
         cleaned_response = re.sub(r'\n?```\s*$', '', cleaned_response)
         cleaned_response = cleaned_response.strip()
 
-        try:
-            return json.loads(cleaned_response)
-        except json.JSONDecodeError:
-            raise ValueError(f"Invalid JSON format from LLM: {cleaned_response}")
+        return self._parse_json_with_repair(cleaned_response)
+
+    def _parse_json_with_repair(self, raw: str) -> Dict[str, Any]:
+        """
+        Parse model JSON; on failure try trailing-comma fix and substring extraction (Phase 9 TASK-027).
+        """
+        attempts: List[str] = [raw.strip(), _repair_json_loose(raw)]
+        sub = _extract_top_level_json_object(raw)
+        if sub and sub not in attempts:
+            attempts.append(sub)
+            attempts.append(_repair_json_loose(sub))
+
+        last_err: Optional[Exception] = None
+        for candidate in attempts:
+            if not candidate:
+                continue
+            try:
+                return json.loads(candidate)
+            except json.JSONDecodeError as e:
+                last_err = e
+                continue
+
+        snippet = raw[:500] + ("…" if len(raw) > 500 else "")
+        raise ValueError(f"Invalid JSON from LLM after repair attempts: {last_err}; snippet: {snippet}")

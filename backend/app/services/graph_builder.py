@@ -9,8 +9,10 @@ import threading
 from typing import Dict, Any, List, Optional, Callable
 from dataclasses import dataclass
 
+from ..config import Config
 from ..models.task import TaskManager, TaskStatus
 from ..storage import GraphStorage
+from ..utils.ingest_counters import get_ingest_counters
 from .text_processor import TextProcessor
 
 logger = logging.getLogger('mirofish.graph_builder')
@@ -50,7 +52,7 @@ class GraphBuilderService:
         graph_name: str = "MiroFish Graph",
         chunk_size: int = 500,
         chunk_overlap: int = 50,
-        batch_size: int = 3
+        batch_size: Optional[int] = None,
     ) -> str:
         """
         Build graph asynchronously
@@ -94,7 +96,7 @@ class GraphBuilderService:
         graph_name: str,
         chunk_size: int,
         chunk_overlap: int,
-        batch_size: int
+        batch_size: Optional[int],
     ):
         """Graph build worker thread"""
         try:
@@ -132,12 +134,15 @@ class GraphBuilderService:
 
             # 4. Send data in batches (NER + embedding + Neo4j insert — synchronous)
             episode_uuids = self.add_text_batches(
-                graph_id, chunks, batch_size,
-                lambda msg, prog: self.task_manager.update_task(
+                graph_id,
+                chunks,
+                batch_size,
+                lambda msg, prog, det=None: self.task_manager.update_task(
                     task_id,
                     progress=20 + int(prog * 0.6),  # 20-80%
-                    message=msg
-                )
+                    message=msg,
+                    **({"progress_detail": det} if det is not None else {}),
+                ),
             )
 
             # 5. Wait for processing (no-op for Neo4j — already synchronous)
@@ -185,13 +190,16 @@ class GraphBuilderService:
         self,
         graph_id: str,
         chunks: List[str],
-        batch_size: int = 3,
+        batch_size: Optional[int] = None,
         progress_callback: Optional[Callable] = None
     ) -> List[str]:
         """Add text in batches to graph, return uuid list of all episodes"""
+        if batch_size is None:
+            batch_size = Config.GRAPH_INGEST_BATCH_SIZE
         episode_uuids = []
         total_chunks = len(chunks)
         total_batches = (total_chunks + batch_size - 1) // batch_size
+        ctr = get_ingest_counters()
 
         logger.info(f"[graph_build] Starting: {total_chunks} chunks, {total_batches} batches (batch_size={batch_size})")
 
@@ -203,7 +211,13 @@ class GraphBuilderService:
                 progress = (i + len(batch_chunks)) / total_chunks
                 progress_callback(
                     f"Processing batch {batch_num}/{total_batches} ({len(batch_chunks)} chunks)...",
-                    progress
+                    progress,
+                    {
+                        "chunks_done": min(i + len(batch_chunks), total_chunks),
+                        "chunks_total": total_chunks,
+                        "batch_index": batch_num,
+                        "batch_total": total_batches,
+                    },
                 )
 
             for j, chunk in enumerate(batch_chunks):
@@ -217,18 +231,24 @@ class GraphBuilderService:
                 try:
                     episode_id = self.storage.add_text(graph_id, chunk)
                     episode_uuids.append(episode_id)
+                    ctr.record_ok()
                     elapsed = time.time() - t0
                     logger.info(
                         f"[graph_build] Chunk {chunk_idx}/{total_chunks} done in {elapsed:.1f}s"
                     )
                 except Exception as e:
+                    ctr.record_fail()
                     elapsed = time.time() - t0
                     logger.error(
                         f"[graph_build] Chunk {chunk_idx}/{total_chunks} FAILED "
                         f"after {elapsed:.1f}s: {e}"
                     )
                     if progress_callback:
-                        progress_callback(f"Batch {batch_num} processing failed: {str(e)}", 0)
+                        progress_callback(
+                            f"Batch {batch_num} processing failed: {str(e)}",
+                            0,
+                            {"chunks_failed_at": chunk_idx, "chunks_total": total_chunks},
+                        )
                     raise
 
         logger.info(f"[graph_build] All {total_chunks} chunks processed successfully")
@@ -244,9 +264,9 @@ class GraphBuilderService:
             entity_types=info.get("entity_types", []),
         )
 
-    def get_graph_data(self, graph_id: str) -> Dict[str, Any]:
+    def get_graph_data(self, graph_id: str, **kwargs) -> Dict[str, Any]:
         """Get complete graph data (including details)"""
-        return self.storage.get_graph_data(graph_id)
+        return self.storage.get_graph_data(graph_id, **kwargs)
 
     def delete_graph(self, graph_id: str):
         """Delete graph"""

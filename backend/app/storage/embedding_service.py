@@ -8,7 +8,6 @@ Uses Ollama's /api/embed endpoint for vector generation (768 dimensions).
 import time
 import logging
 from typing import List, Optional
-from functools import lru_cache
 
 import requests
 
@@ -56,14 +55,13 @@ class EmbeddingService:
 
         text = text.strip()
 
-        # Check cache
-        if text in self._cache:
-            return self._cache[text]
+        cached = self._cache_get(text)
+        if cached is not None:
+            return cached
 
         vectors = self._request_embeddings([text])
         vector = vectors[0]
 
-        # Cache result
         self._cache_put(text, vector)
 
         return vector
@@ -91,8 +89,9 @@ class EmbeddingService:
         # Check cache first
         for i, text in enumerate(texts):
             text = text.strip() if text else ""
-            if text in self._cache:
-                results[i] = self._cache[text]
+            hit = self._cache_get(text) if text else None
+            if hit is not None:
+                results[i] = hit
             elif text:
                 uncached_indices.append(i)
                 uncached_texts.append(text)
@@ -181,6 +180,22 @@ class EmbeddingService:
             f"Ollama embedding failed after {self.max_retries} retries: {last_error}"
         )
 
+    def _cache_get(self, text: str) -> Optional[List[float]]:
+        """Return cached vector or None (respects EMBEDDING_CACHE_TTL_SEC when > 0)."""
+        ttl = Config.EMBEDDING_CACHE_TTL_SEC
+        entry = self._cache.get(text)
+        if entry is None:
+            return None
+        if ttl > 0:
+            vec, ts = entry  # type: ignore[misc]
+            if time.time() - ts >= ttl:
+                del self._cache[text]
+                return None
+            return vec
+        if isinstance(entry, tuple):
+            return entry[0]  # type: ignore[return-value]
+        return entry  # type: ignore[return-value]
+
     def _cache_put(self, text: str, vector: List[float]) -> None:
         """Add to cache, evicting oldest entries if full."""
         if len(self._cache) >= self._cache_max_size:
@@ -188,7 +203,11 @@ class EmbeddingService:
             keys_to_remove = list(self._cache.keys())[:self._cache_max_size // 10]
             for key in keys_to_remove:
                 del self._cache[key]
-        self._cache[text] = vector
+        ttl = Config.EMBEDDING_CACHE_TTL_SEC
+        if ttl > 0:
+            self._cache[text] = (vector, time.time())
+        else:
+            self._cache[text] = vector
 
     def health_check(self) -> bool:
         """Check if Ollama embedding endpoint is reachable."""

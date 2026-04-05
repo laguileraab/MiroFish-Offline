@@ -147,7 +147,8 @@ class FileParser:
 def split_text_into_chunks(
     text: str,
     chunk_size: int = 500,
-    overlap: int = 50
+    overlap: int = 50,
+    prefer_paragraph_boundary: bool = False,
 ) -> List[str]:
     """
     Split text into chunks
@@ -156,6 +157,7 @@ def split_text_into_chunks(
         text: Original text
         chunk_size: Characters per chunk
         overlap: Overlapping characters
+        prefer_paragraph_boundary: If True, snap end backward to \\n\\n when in latter part of window (Phase 10).
 
     Returns:
         List of text chunks
@@ -177,6 +179,12 @@ def split_text_into_chunks(
                 if last_sep != -1 and last_sep > chunk_size * 0.3:
                     end = start + last_sep + len(sep)
                     break
+
+        if prefer_paragraph_boundary and end < len(text):
+            lo = start + max(1, int(chunk_size * 0.4))
+            para = text.rfind("\n\n", start, end)
+            if para >= lo:
+                end = para + 2
 
         chunk = text[start:end].strip()
         if chunk:

@@ -2,100 +2,137 @@
 
 ## Overview
 
-Post-migration enhancement plan: strengthen **knowledge-graph ingestion**, **entity/relation quality**, **retrieval**, **temporal memory**, and **operations** using patterns from **Zep** and **Graphiti**, while **keeping Neo4j** as the graph store. Graphiti is an **application layer** reference (extract, merge, time, search)—not a replacement for Neo4j.
+This document is the **post-migration memory and quality roadmap**. It builds on the work tracked in [`docs/progress.md`](progress.md).
 
-**Execution order (summary):** Phase 8 → 9 → (10A+10C) → measure → 10B → 11 → 13 → 12 → 14 → optional 15.
+**Scope:** Strengthen **knowledge-graph ingestion**, **entity/relation quality**, **retrieval**, **temporal memory**, and **operations** using patterns from **Zep** and **Graphiti**, while **keeping Neo4j** as the graph store. Graphiti is an **application layer** reference (extract, merge, time, search)—not a replacement for Neo4j.
 
-**Prerequisites:** Migration phases in `progress.md` (Phases 0–6 complete; Phase 7 publish optional).
+**Canonical migration tracker:** [`docs/progress.md`](progress.md) — Phases **0–6** (TASK-001–018) are **COMPLETE**; **Phase 7** (TASK-019 publish) remains **TODO** there.
 
 ---
 
-## PHASE 8 — Baseline, metrics, and guardrails (TODO)
+## Phase index (single source of truth)
+
+| Phase | Focus | Task range | Status |
+|------:|-------|------------|--------|
+| **0** | Scaffolding — `LLMClient`, `NERExtractor`, `EmbeddingService` | TASK-001–003 | **Complete** — see `progress.md` |
+| **1** | Storage — `GraphStorage`, `Neo4jStorage`, hybrid search | TASK-004–007 | **Complete** |
+| **2** | Service rewrite — `graph_builder`, `entity_reader`, `graph_tools`, `report_agent`, `graph_memory_updater`, Zep → GraphStorage | TASK-008–014b | **Complete** |
+| **3** | Flask DI — `Neo4jStorage` in `create_app`, API wiring | TASK-015 | **Complete** |
+| **4** | End-to-end import / app factory smoke | TASK-016 | **Complete** |
+| **5** | CAMEL-AI + Ollama compatibility | TASK-017 | **Complete** |
+| **6** | Cleanup — delete `zep_*.py`, docstring fixes | TASK-018 | **Complete** |
+| **7** | Publish — rename branding, AGPL-3.0, GitHub | TASK-019 | **TODO** (`progress.md`) |
+| **8** | Baseline metrics, ingest logging, golden set, config runbook | TASK-020–023 | **Done** (v3.1 — see § Phase 8) |
+| **9** | Inference stack — dedicated extract model, tokens, context, JSON repair | TASK-024–027 | **Done** (v3.2 — see § Phase 9) |
+| **10** | Extraction pipeline — two-pass, linking, chunking, provenance | TASK-028–033 | **Done** (v3.3 — see § Phase 10) |
+| **11** | Graph maintenance — merge, dedupe, summarization | TASK-034–038 | **Done** (v3.4 — see § Phase 11) |
+| **12** | Temporal memory — validity, as-of retrieval | TASK-039–041 | **Done** (v3.5 — see § Phase 12) |
+| **13** | Retrieval — hybrid tuning, expansion, optional rerank/cache | TASK-042–045 | **Done** (v3.6 — see § Phase 13) |
+| **14** | Throughput — job queue, backpressure, admin metrics | TASK-046–048 | **Done** (v3.7 — see § Phase 14) |
+| **15** | Graphiti evaluation spike (optional) | TASK-049–050 | TODO |
+
+**Memory execution order (summary):** Phase 8 → 9 → (10A+10C) → measure → 10B → 11 → 13 → 12 → 14 → optional 15.
+
+**Prerequisites for memory work:** Migration **Phases 0–6** done (per `progress.md`). **Phase 7** (publish) is independent of Phases 8+; complete it when ready for public repo hygiene, not blocking local memory improvements.
+
+---
+
+## PHASE 7 — Publish (TODO — tracked in `progress.md`)
+
+**Goal:** Repo and licensing ready for public GitHub.
+
+- **TASK-019**: Rename to MiroFish-Offline, add AGPL-3.0 license, publish to GitHub
+
+*Detail, file lists, and completed migration tasks (Phases 0–6) remain in [`docs/progress.md`](progress.md). Do not duplicate TASK-001–018 here; update that file when migration-adjacent work lands.*
+
+---
+
+## PHASE 8 — Baseline, metrics, and guardrails (COMPLETE)
 
 **Goal:** Measure whether each change improves density, reliability, or latency.
 
-- **TASK-020**: Define KPIs for graph build—entities/chunk, relations/chunk, edge-to-node ratio, JSON parse failure rate, mean chunk latency; log tokens if available from LLM/server
-- **TASK-021**: Add structured ingest logging after `add_text`—`len(entities)`, `len(relations)`, chunk char count, warnings when near `max_tokens` / suspected truncation
-- **TASK-022**: Create a **golden set** (2–3 fixed documents + ontology); script or runbook to re-run after each phase and snapshot node/edge counts
-- **TASK-023**: Document config checklist in `.env.example` / internal runbook—`LLM_*`, `GRAPH_CHUNK_SIZE`, `GRAPH_CHUNK_OVERLAP`, `NER_MAX_OUTPUT_TOKENS`, Ollama `OLLAMA_NUM_CTX` / LM Studio context vs prompt+chunk size
+- **TASK-020**: **Done** — KPI field contract in `backend/app/utils/ingest_metrics.py` (`INGEST_METRIC_KEYS`, `edge_to_node_ratio`, `build_ingest_metrics`). Token usage and `finish_reason` captured on `LLMClient` after each completion (`last_usage`, `last_finish_reason`).
+- **TASK-021**: **Done** — `Neo4jStorage.add_text` emits one JSON line per chunk: `ingest_metrics {...}`; guardrail warnings `ingest_guardrail` for truncation, sparse relations, NER failure. Skipped relations (missing endpoints) counted as `relations_skipped_missing_endpoint`.
+- **TASK-022**: **Done** — `docs/golden-set/` (3 sample texts + `ontology-min.json` + `README.md`); `scripts/snapshot_golden_counts.py` for entity/relation/episode counts.
+- **TASK-023**: **Done** — `.env.example` expanded (chunk env, `OLLAMA_NUM_CTX`, `LLM_PROVIDER`); `Config.DEFAULT_CHUNK_SIZE` / `DEFAULT_CHUNK_OVERLAP` read `GRAPH_CHUNK_SIZE` / `GRAPH_CHUNK_OVERLAP`.
 
 ---
 
-## PHASE 9 — Inference stack (TODO)
+## PHASE 9 — Inference stack (COMPLETE)
 
 **Goal:** Remove the main ceiling on extraction quality and JSON completeness.
 
-- **TASK-024**: Support optional **dedicated** LLM model/base URL for NER/RE only (strong extract vs cheap chat), wired through `Config` and `NERExtractor` / `LLMClient`
-- **TASK-025**: Tune `NER_MAX_OUTPUT_TOKENS` using golden set until `relations` arrays stop being cut off; document safe ranges per model
-- **TASK-026**: Verify input context—server `num_ctx` (Ollama) or LM Studio context ≥ ontology + chunk; add startup warning or doc if mismatch risks silent truncation
-- **TASK-027**: Prefer structured JSON/schema where provider supports it; optional **JSON repair** retry path in `LLMClient.chat_json` or `NERExtractor`
+- **TASK-024**: **Done** — `LLM_EXTRACT_BASE_URL`, `LLM_EXTRACT_MODEL_NAME`, `LLM_EXTRACT_API_KEY`, `LLM_EXTRACT_HTTP_TIMEOUT_SEC`, optional `OLLAMA_EXTRACT_NUM_CTX` on `LLMClient(..., num_ctx=…)`; `NERExtractor` uses `_default_llm_for_extraction()` when no client is injected.
+- **TASK-025**: **Done** — tuning guide [`docs/golden-set/NER_MAX_OUTPUT_TOKENS.md`](golden-set/NER_MAX_OUTPUT_TOKENS.md) (ranges + procedure with golden set + `ingest_metrics`).
+- **TASK-026**: **Done** — `Config.ingest_context_warnings()`; merged into `Config.validate()`; logged at app startup (`create_app`). LM Studio: same heuristic applies to whatever context you set server-side (documented in `.env.example`).
+- **TASK-027**: **Done** — `LLMClient.chat_json` → `_parse_json_with_repair`: trailing-comma fix + string-aware `{…}` extraction before failing. Still uses `json_object` when the server accepts it (existing `chat()` behavior).
 
 ---
 
-## PHASE 10 — Extraction pipeline (TODO)
+## PHASE 10 — Extraction pipeline (COMPLETE)
 
 **Goal:** Split work so relations are not starved; improve cross-chunk linking and provenance.
 
 ### 10A — Two-pass extraction
 
-- **TASK-028**: Implement Pass 1—entities (+ attributes) only; stable JSON shape
-- **TASK-029**: Implement Pass 2—same text + frozen entity list → relations only; ontology relation types + coverage of explicit dependencies (`NER_TWO_PASS` or `GraphIngestionPipeline` + `neo4j_storage.add_text`)
+- **TASK-028**: **Done** — Pass 1 prompts in `ner_extractor.py` (`_PASS1_*`); JSON `{"entities":[...]}` only; cleaned via `_validate_and_clean`.
+- **TASK-029**: **Done** — Pass 2 `_PASS2_*` with frozen entity lines + optional graph candidates; relations merged with pass-1 entities. Enable with **`NER_TWO_PASS=true`**. Ingest logs `ner_two_pass` in `ingest_metrics`.
 
 ### 10B — Graph-aware linking
 
-- **TASK-030**: Before/after Pass 2, retrieve top-K existing entities per `graph_id` (vector similarity to chunk via `SearchService` or Cypher); inject short candidate list into prompt for supported links
+- **TASK-030**: **Done** — `Neo4jStorage._graph_link_candidates()` uses `SearchService.search_nodes` on chunk text (truncated); **`NER_LINK_TOP_K`** (default 12, `0` = off). Candidates go to pass-2 prompt when **`NER_TWO_PASS`**; otherwise appended to the single-pass user message.
 
 ### 10C — Chunking
 
-- **TASK-031**: Env or preset profiles for chunk size/overlap per model tier; keep overlap ~6–10% of chunk size (`config.py`, `file_parser.split_text_into_chunks`)
-- **TASK-032** (optional): Semantic chunk boundaries (headings/paragraphs) layered on character caps in `file_parser.py`
+- **TASK-031**: **Done** — **`GRAPH_CHUNK_PROFILE`** = `small` (400/40), `medium` (500/50), `large` (800/80) when **`GRAPH_CHUNK_SIZE`** is unset (`config.py`).
+- **TASK-032**: **Done** — **`GRAPH_CHUNK_PREFER_PARAGRAPH=true`** → `split_text_into_chunks(..., prefer_paragraph_boundary=True)` via `TextProcessor.split_text`.
 
 ### 10D — Episode provenance
 
-- **TASK-033**: Add episodic subgraph edges—`(Episode)-[:MENTIONS]->(Entity)` and/or links to facts; extend `neo4j_schema.py` and `Neo4jStorage.add_text`
+- **TASK-033**: **Done** — After entity upserts, `MERGE (ep:Episode)-[:MENTIONS]->(n:Entity)` for all entity UUIDs written in the chunk (`neo4j_storage.py`); schema note in `neo4j_schema.py`.
 
 ---
 
-## PHASE 11 — Graph maintenance (merge graph) (TODO)
+## PHASE 11 — Graph maintenance (merge graph) (COMPLETE)
 
 **Goal:** Fewer duplicates, canonical entities, controlled edge growth.
 
-- **TASK-034**: Deterministic entity normalization (strings, optional alias table / acronyms)
-- **TASK-035**: Embedding-based candidate retrieval for new entities → merge or `SAME_AS` above threshold
-- **TASK-036**: Batched LLM adjudication for ambiguous pairs only (“same real-world entity?”)
-- **TASK-037**: Edge dedupe—`MERGE` or match on `(src, tgt, type, normalized fact)`; append `episode_ids` when reinforcing
-- **TASK-038**: Background **entity summarization** from accumulated facts for high-traffic nodes (`graph_maintenance.py` or `services/`)
+- **TASK-034**: **Done** — `storage/entity_normalize.py`: NFKC, whitespace collapse, optional **`ENTITY_ALIAS_JSON_PATH`** (see `docs/golden-set/entity-aliases.example.json`). Applied on ingest before embedding.
+- **TASK-035**: **Done** — **`GRAPH_MERGE_VECTOR_ENABLED`**: `SearchService.search_nodes_by_vector` + reuse canonical **`uuid`** when cosine score ≥ **`GRAPH_MERGE_VECTOR_THRESHOLD`** (no separate `SAME_AS` node).
+- **TASK-036**: **Done** — **`GRAPH_MERGE_LLM_ADJUDICATE`**: for scores between **`GRAPH_MERGE_VECTOR_AMBIG_LOW`** and threshold, `merge_adjudicator.llm_same_real_world_entity` (NER LLM client).
+- **TASK-037**: **Done** — **`RELATION_DEDUPE_ENABLED`** (default on): `fact_normalized` + match existing `RELATION`; append **`episode_ids`**; legacy edges matched by raw `fact` if `fact_normalized` is null.
+- **TASK-038**: **Done** — `services/graph_maintenance.py`: **`refresh_entity_summary_llm`**; ingest runs up to **`ENTITY_SUMMARY_MAX_PER_CHUNK`** refreshes per chunk (default **0**).
 
 ---
 
-## PHASE 12 — Temporal memory (TODO)
+## PHASE 12 — Temporal memory (COMPLETE)
 
 **Goal:** Facts can update without deleting history.
 
-- **TASK-039**: Contradiction policy—invalidate old `RELATION` (`invalid_at`/`valid_at`) and add new edge or version chain
-- **TASK-040**: Optional LLM/metadata hints (`supersedes`, time expressions) on ingest
-- **TASK-041**: Retrieval defaults—filter `invalid_at IS NULL` or support **as-of** queries for reports/simulations
+- **TASK-039**: **Done** — On ingest, when **`GRAPH_TEMPORAL_ENABLED`** and **`GRAPH_TEMPORAL_SUPERSEDE_SAME_TRIPLE`**, creating a new `RELATION` with the same `(src,tgt,type)` but a different `fact_normalized` sets **`invalid_at`** on previously active edges; new edge gets **`valid_at`** (episode time or optional `valid_from`).
+- **TASK-040**: **Done** — `ner_extractor` passes through optional relation keys **`valid_from`** (ISO-8601) and **`supersedes_relation_uuid`** (sets that edge’s **`invalid_at`** on ingest). Episode **`created_at`** remains provenance on `Episode`.
+- **TASK-041**: **Done** — When temporal mode is on and **`GRAPH_TEMPORAL_QUERY_ACTIVE_ONLY`**, hybrid edge search (`search_service`), **`get_all_edges`**, **`get_node_edges`**, **`get_graph_data`**, **`get_graph_info`** edge counts, and **`fetch_entity_fact_bullets`** filter active edges; optional **`GRAPH_QUERY_AS_OF_ISO`** and per-call **`as_of`** / **`include_invalid_relations`** on `Neo4jStorage.search` and `GraphToolsService` (`search_graph`, `get_all_edges`, `get_node_edges`).
 
 ---
 
-## PHASE 13 — Retrieval and agent memory (TODO)
+## PHASE 13 — Retrieval and agent memory (COMPLETE)
 
 **Goal:** Richer context for `GraphToolsService`, `ReportAgent`, agent chat.
 
-- **TASK-042**: Env-driven `SEARCH_VECTOR_WEIGHT` / `SEARCH_KEYWORD_WEIGHT` with sum-to-1 validation (`search_service.py`, `config.py`)
-- **TASK-043**: Post–hybrid-search graph expansion—1–2 hops, degree caps, optional entity-type filters
-- **TASK-044** (optional): Rerank top-M hits (cross-encoder or small LLM)
-- **TASK-045** (optional): Cache query embeddings and hot subgraph reads per `graph_id` with TTL during long simulations
+- **TASK-042**: **Done** — `SEARCH_VECTOR_WEIGHT` / `SEARCH_KEYWORD_WEIGHT` in `config.py` (defaults 0.7 / 0.3); `SearchService._merge_results` uses them; `Config.validate()` requires sum 1.0 ±0.02.
+- **TASK-043**: **Done** — `GRAPH_SEARCH_EXPAND_HOPS` (0–2), `GRAPH_SEARCH_EXPAND_EXTRA`, `GRAPH_SEARCH_EXPAND_MAX_PER_SEED`, optional `GRAPH_SEARCH_EXPAND_ENTITY_TYPES`; BFS neighbor `RELATION`s in `search_service.py` with shared `relation_temporal_filters.py`. `scope=both` runs node search first, then edge search with `extra_seed_node_uuids` from node hits.
+- **TASK-044** (optional): **Done (lightweight)** — `GRAPH_SEARCH_RERANK_TOP_M` + `GRAPH_SEARCH_RERANK_BOOST`: token Jaccard overlap on query vs fact/name/summary for the top-M by fused score (no cross-encoder).
+- **TASK-045** (optional): **Done** — `EMBEDDING_CACHE_TTL_SEC` on `EmbeddingService` cache entries; `GRAPH_SEARCH_RESULT_CACHE_TTL_SEC` on full `Neo4jStorage.search` payloads (keyed by graph/query/scope/limit + relevant retrieval flags).
 
 ---
 
-## PHASE 14 — Throughput, async jobs, and UX (TODO)
+## PHASE 14 — Throughput, async jobs, and UX (COMPLETE)
 
 **Goal:** Resilient builds, visibility, controlled concurrency.
 
-- **TASK-046**: **Job queue** for graph build—enqueue chunk batches, return `job_id`, persist status; API + UI poll (implements real `wait_for_processing` semantics if desired)
-- **TASK-047**: Backpressure—max concurrent LLM calls; tie batch size to VRAM/CPU
-- **TASK-048**: Admin/dashboard metrics—episodes processed, failed chunks, avg relations/chunk, merge stats
+- **TASK-046**: **Done** — `TaskManager` optional JSON persistence when **`GRAPH_JOB_PERSIST_DIR`** is set (survives poll after process restart for finished tasks). New **`POST /api/graph/jobs/chunks`** enqueues `graph_chunk_ingest` with `task_id`; poll existing **`GET /api/graph/task/<task_id>`**. Project graph build fixes **`create_task("graph_build", metadata=...)`** and uses **`GRAPH_INGEST_BATCH_SIZE`**; chunk progress in **`progress_detail`** (`chunks_done`, `chunks_total`, batches).
+- **TASK-047**: **Done** — **`LLM_INGEST_MAX_CONCURRENT`** (default **2**, **0** = unlimited) via `threading.BoundedSemaphore` in **`utils/llm_ingest_concurrency.py`**, applied around **`Neo4jStorage.add_text`**. **`GRAPH_INGEST_BATCH_SIZE`** (default **3**) for ingest batching.
+- **TASK-048**: **Done** — **`GET /api/graph/admin/ingest-stats`** returns **`process_counters`** (`chunks_ok` / `chunks_failed` from **`utils/ingest_counters.py`**) and Neo4j **`episodes_total`** plus per-graph episode counts (optional **`?graph_id=`**). Merge-vector stats remain future work if needed.
 
 ---
 
@@ -112,6 +149,8 @@ Post-migration enhancement plan: strengthen **knowledge-graph ingestion**, **ent
 
 ```mermaid
 flowchart LR
+  M[Phases 0-6 Migration done]
+  P7[Phase 7 Publish]
   P8[Phase 8 Metrics]
   P9[Phase 9 Inference]
   P10[Phase 10 Extract]
@@ -120,6 +159,8 @@ flowchart LR
   P13[Phase 13 Retrieve]
   P14[Phase 14 Async UX]
   P15[Phase 15 Graphiti]
+  M --> P7
+  M --> P8
   P8 --> P9 --> P10 --> P11
   P10 --> P13
   P11 --> P12
@@ -141,21 +182,29 @@ flowchart LR
 ## Clarifications
 
 - **Neo4j vs Graphiti:** Neo4j is the **database**. Graphiti names **patterns and optional software** for ingest/merge/time—not “switch DB to win.”
-- **Code anchors:** `ner_extractor.py`, `neo4j_storage.py`, `neo4j_schema.py`, `graph_storage.py`, `search_service.py`, `llm_client.py`, `config.py`, `file_parser.py`, `graph_memory_updater.py`, `graph_builder.py`, `graph.py` (see paths under `backend/app/`).
+- **Code anchors:** `backend/app/storage/ner_extractor.py`, `backend/app/utils/llm_client.py`, `backend/app/utils/ingest_metrics.py`, `neo4j_storage.py`, `neo4j_schema.py`, `graph_storage.py`, `search_service.py`, `config.py`, `file_parser.py`, `graph_memory_updater.py`, `graph_builder.py`, `graph.py`, `services/graph_tools.py`, `services/entity_reader.py` (see `progress.md` for what already exists).
 
 ---
 
 ## Planned new / touched files (tracking)
 
+Paths below extend the **already landed** layout from `progress.md` (`storage/`, `services/`, `utils/`).
+
 | File / area | Purpose | Status |
 |-------------|---------|--------|
-| `backend/app/storage/graph_maintenance.py` (new) | Dedupe, merge, summarization jobs | TODO |
-| `backend/app/services/graph_ingestion_pipeline.py` (new, optional) | Two-pass + linking orchestration | TODO |
-| `backend/app/storage/ner_extractor.py` | Two-pass, optional repair | TODO |
+| `backend/app/utils/ingest_metrics.py` | KPI schema + structured ingest log line | **Done** (Phase 8) |
+| `backend/app/storage/entity_normalize.py` | Name/fact normalization + aliases | **Done** (Phase 11) |
+| `backend/app/storage/merge_adjudicator.py` | LLM merge adjudication | **Done** (Phase 11) |
+| `backend/app/services/graph_maintenance.py` | Entity summary refresh from facts | **Done** (Phase 11) |
+| `backend/app/storage/graph_maintenance.py` (new) | Optional future batch jobs | Optional |
+| `ner_extractor.py` + `neo4j_storage.py` | Two-pass NER, linking hints, `MENTIONS` | **Done** (Phase 10) |
+| `backend/app/services/graph_ingestion_pipeline.py` (new, optional) | Extra orchestration if split from storage | Optional |
+| `backend/app/storage/ner_extractor.py` | Two-pass, optional JSON repair (Phase 9–10) | TODO |
+| `backend/app/utils/llm_client.py` | Optional extract-only base URL, `chat_json` repair path | TODO |
 | `backend/app/storage/neo4j_storage.py` | Provenance edges, dedupe hooks | TODO |
 | `backend/app/storage/neo4j_schema.py` | Episode–entity relations, indexes if needed | TODO |
 | `backend/app/jobs/` or `services/graph_build_queue.py` (new) | Async build jobs | TODO |
-| `docs/golden-set/` or `scripts/` | Regression assets + runner | TODO |
+| `docs/golden-set/` + `scripts/snapshot_golden_counts.py` | Golden set + count snapshot | **Done** (Phase 8) |
 
 ---
 
@@ -406,5 +455,5 @@ There is **no** seminal paper stating “parallelism improves extraction F1.” 
 
 ---
 
-*Document version: 2.2 — Addendum D: critical synthesis and methodological revisions. Addenda A–D optional for backlog triage.*
+*Document version: 3.4 — Phase 11 implemented (normalize/aliases, vector merge + LLM adjudication, relation dedupe, optional summary refresh). Addenda A–D optional for backlog triage.*
 

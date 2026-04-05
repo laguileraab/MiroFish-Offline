@@ -1,0 +1,2 @@
+Internal security policy SEC-12 requires all vendors to encrypt data at rest.
+The compliance office stated that Acme Robotics must complete a security review before integration.
