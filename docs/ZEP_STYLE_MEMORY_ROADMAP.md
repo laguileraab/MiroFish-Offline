@@ -4,7 +4,7 @@
 
 This document is the **post-migration memory and quality roadmap**. It builds on the work tracked in [`docs/progress.md`](progress.md).
 
-**Scope:** Strengthen **knowledge-graph ingestion**, **entity/relation quality**, **retrieval**, **temporal memory**, and **operations** using patterns from **Zep** and **Graphiti**, while **keeping Neo4j** as the graph store. Graphiti is an **application layer** reference (extract, merge, time, search)—not a replacement for Neo4j.
+**Scope:** Strengthen **knowledge-graph ingestion**, **entity/relation quality**, **retrieval**, **temporal memory**, and **operations** using patterns from **Zep** and **Graphiti**, while **keeping Neo4j** (or another Graphiti-supported backend) as the graph store. **Phase 15** adopts **`graphiti-core`** as the single memory engine for ingest and retrieval; see [`docs/graphiti-cutover.md`](graphiti-cutover.md). Earlier phases (8–14) implemented a custom Neo4j pipeline preserved on branch **`checkpoint/pre-graphiti`**.
 
 **Canonical migration tracker:** [`docs/progress.md`](progress.md) — Phases **0–6** (TASK-001–018) are **COMPLETE**; **Phase 7** (TASK-019 publish) remains **TODO** there.
 
@@ -29,7 +29,7 @@ This document is the **post-migration memory and quality roadmap**. It builds on
 | **12** | Temporal memory — validity, as-of retrieval | TASK-039–041 | **Done** (v3.5 — see § Phase 12) |
 | **13** | Retrieval — hybrid tuning, expansion, optional rerank/cache | TASK-042–045 | **Done** (v3.6 — see § Phase 13) |
 | **14** | Throughput — job queue, backpressure, admin metrics | TASK-046–048 | **Done** (v3.7 — see § Phase 14) |
-| **15** | Graphiti evaluation spike (optional) | TASK-049–050 | TODO |
+| **15** | Graphiti integration — `graphiti-core` as `GraphStorage` | TASK-049–050 | **In progress** — [`graphiti-cutover.md`](graphiti-cutover.md) |
 
 **Memory execution order (summary):** Phase 8 → 9 → (10A+10C) → measure → 10B → 11 → 13 → 12 → 14 → optional 15.
 
@@ -136,12 +136,14 @@ This document is the **post-migration memory and quality roadmap**. It builds on
 
 ---
 
-## PHASE 15 — Graphiti evaluation spike (TODO — optional)
+## PHASE 15 — Graphiti integration (in progress)
 
-**Goal:** Build-vs-adopt decision after Phases 9–10 land.
+**Goal:** Replace the custom Neo4j ingest/search stack with **[Graphiti](https://github.com/getzep/graphiti)** as the **only** writer and query path for graph memory (no dual-write). Baseline snapshot: branch **`checkpoint/pre-graphiti`**.
 
-- **TASK-049**: Run [Graphiti](https://github.com/getzep/graphiti) on a copy of golden data with same LLM stack; compare density, dedupe, ops cost
-- **TASK-050**: If adopting, document integration options (sidecar vs replace ingest only) and storage sync
+**Canonical plan:** [`docs/graphiti-cutover.md`](graphiti-cutover.md) — Zep SDK → Graphiti mapping, `GraphitiStorage` adapter outline, Neo4j version notes, rollout steps.
+
+- **TASK-049**: Implement `GraphStorage` backed by `graphiti-core`; vertical slice ingest + hybrid search (golden set / smoke).
+- **TASK-050**: Env/runbook, ontology mapping, config flag (`GRAPH_BACKEND` or equivalent); re-ingest strategy for existing deployments.
 
 ---
 
@@ -455,5 +457,5 @@ There is **no** seminal paper stating “parallelism improves extraction F1.” 
 
 ---
 
-*Document version: 3.4 — Phase 11 implemented (normalize/aliases, vector merge + LLM adjudication, relation dedupe, optional summary refresh). Addenda A–D optional for backlog triage.*
+*Document version: 3.8 — Phase 15 reframed as Graphiti integration; see `graphiti-cutover.md`. Phases 8–14 complete on `checkpoint/pre-graphiti`. Addenda A–D optional for backlog triage.*
 
