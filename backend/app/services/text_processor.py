@@ -1,5 +1,5 @@
 """
-Textatmanageserveservice
+Text extraction and chunking helpers for graph ingestion.
 """
 
 from typing import List
@@ -36,15 +36,13 @@ class TextProcessor:
     @staticmethod
     def preprocess_text(text: str) -> str:
         """
-        preatmanageText
-        - moveexceptmanyremainingspacewhite
-        - markprepareconvertswitchperform
-        
+        Normalize whitespace: unify newlines, trim lines, collapse long blank runs.
+
         Args:
-            text: sourcestartText
-            
+            text: Raw extracted text.
+
         Returns:
-            atmanageaftersText
+            Cleaned text ready for chunking.
         """
         import re
         

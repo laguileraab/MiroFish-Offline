@@ -1357,7 +1357,7 @@ class ReportAgent:
                 else:
                     # Third time: downgrade, truncate to first tool call, force execution
                     logger.warning(
-                        f"Section {section.title}: consecutive {conflict_retries} conflicts，"
+                        f"Section {section.title}: consecutive {conflict_retries} conflicts, "
                         "downgraded to truncate and execute first tool call"
                     )
                     first_tool_end = response.find('</tool_call>')
@@ -1385,7 +1385,11 @@ class ReportAgent:
                 if tool_calls_count < min_tool_calls:
                     messages.append({"role": "assistant", "content": response})
                     unused_tools = all_tools - used_tools
-                    unused_hint = f"(These tools have not been used, recommend using them: {', '.join(unused_tools)}）" if unused_tools else ""
+                    unused_hint = (
+                        f"(Unused tools you may call: {', '.join(unused_tools)})"
+                        if unused_tools
+                        else ""
+                    )
                     messages.append({
                         "role": "user",
                         "content": REACT_INSUFFICIENT_TOOLS_MSG.format(
@@ -1398,7 +1402,9 @@ class ReportAgent:
 
                 # Normal completion
                 final_answer = response.split("Final Answer:")[-1].strip()
-                logger.info(f"Section {section.title} generation completed (tool calls: {tool_calls_count}times)")
+                logger.info(
+                    f"Section {section.title} generation completed (tool calls: {tool_calls_count})"
+                )
 
                 if self.report_logger:
                     self.report_logger.log_section_content(
@@ -1459,7 +1465,7 @@ class ReportAgent:
                 unused_tools = all_tools - used_tools
                 unused_hint = ""
                 if unused_tools and tool_calls_count < self.MAX_TOOL_CALLS_PER_SECTION:
-                    unused_hint = REACT_UNUSED_TOOLS_HINT.format(unused_list="、".join(unused_tools))
+                    unused_hint = REACT_UNUSED_TOOLS_HINT.format(unused_list=", ".join(unused_tools))
 
                 messages.append({"role": "assistant", "content": response})
                 messages.append({
@@ -1475,13 +1481,17 @@ class ReportAgent:
                 })
                 continue
 
-            # ── Case 3: NeitherTool call，nor Final Answer ──
+            # ── Case 3: Neither tool call nor Final Answer ──
             messages.append({"role": "assistant", "content": response})
 
             if tool_calls_count < min_tool_calls:
-                # Tool callcount insufficient，recommend unused tools
+                # Too few tool calls; nudge toward unused tools
                 unused_tools = all_tools - used_tools
-                unused_hint = f"(These tools have not been used, recommend using them: {', '.join(unused_tools)}）" if unused_tools else ""
+                unused_hint = (
+                    f"(Unused tools you may call: {', '.join(unused_tools)})"
+                    if unused_tools
+                    else ""
+                )
 
                 messages.append({
                     "role": "user",
@@ -1493,9 +1503,11 @@ class ReportAgent:
                 })
                 continue
 
-            # Directly adopt this content as final answer, no more waiting
-            # directlyconvertthis contentas finalanswer, no more waiting
-            logger.info(f"Section {section.title} did not detectto 'Final Answer:' prefix, directlyadoptLLM outputas finalcontent（Tool call: {tool_calls_count}times)")
+            # No Final Answer prefix; treat raw model text as the section body
+            logger.info(
+                f"Section {section.title}: no 'Final Answer:' prefix; using raw LLM text "
+                f"(tool calls so far: {tool_calls_count})"
+            )
             final_answer = response.strip()
 
             if self.report_logger:
@@ -1507,8 +1519,8 @@ class ReportAgent:
                 )
             return final_answer
         
-        # Reachedmaximum iterations, forcegeneratecontent
-        logger.warning(f"Section {section.title} reachedmaximumiterationscount，Forcegenerate")
+        # Max iterations reached; force a final answer
+        logger.warning(f"Section {section.title}: max iterations reached; forcing final answer")
         messages.append({"role": "user", "content": REACT_FORCE_FINAL_MSG})
         
         response = self.llm.chat(
@@ -1517,16 +1529,15 @@ class ReportAgent:
             max_tokens=4096
         )
 
-        # Check forceconclusion when LLM return is None
+        # Handle empty LLM response after force-final prompt
         if response is None:
-            final_answer = f"(This section generation failed: LLM returned empty response, please retry later)"
-            final_answer = f"(ThisSectiongeneratefailed: LLM returnedemptyresponse, pleaselaterretry)"
+            final_answer = "(This section failed: the model returned an empty response. Please retry.)"
         elif "Final Answer:" in response:
             final_answer = response.split("Final Answer:")[-1].strip()
         else:
             final_answer = response
         
-        # Log sectioncontentgeneratecompletion log
+        # Log completed section
         if self.report_logger:
             self.report_logger.log_section_content(
                 section_title=section.title,
@@ -1543,29 +1554,21 @@ class ReportAgent:
         report_id: Optional[str] = None
     ) -> Report:
         """
-        Generate complete report (realtime output per section)
-        
-        File structure:
-        File structure:
-        reports/{report_id}/
-            outline.json    - Report outline
-            progress.json   - Generation progress
-            section_01.md   - Section 1
-            section_02.md   - Section 2
-            section_02.md   - Section 2
-            ...
-            full_report.md  - Complete report
-        
+        Generate the full report (streams each section to disk as it completes).
+
+        Layout under ``reports/{report_id}/``:
+            outline.json, progress.json, section_XX.md, full_report.md
+
         Args:
-            report_id: Report ID (optional, auto-generate if not provided)
-            report_id: Report ID (optional, auto-generate if not provided)
-            
+            progress_callback: Optional ``(stage, progress_pct, message)`` hook.
+            report_id: Optional id; a new one is created if omitted.
+
         Returns:
-            Report: Complete report
+            The completed ``Report`` object.
         """
         import uuid
         
-        # If not provided report_id，then autogenerate
+        # Auto-assign report_id when omitted
         if not report_id:
             report_id = f"report_{uuid.uuid4().hex[:12]}"
         start_time = datetime.now()
@@ -1579,14 +1582,14 @@ class ReportAgent:
             created_at=datetime.now().isoformat()
         )
         
-        # CompletedSection Titlelist（for progress tracking）
+        # Section titles finished so far (for progress tracking)
         completed_section_titles = []
         
         try:
             # Initialize: Create report folder and save initial state
             ReportManager._ensure_report_folder(report_id)
             
-            # Initialize logslogger（structured logs agent_log.jsonl）
+            # Structured JSONL log (agent_log.jsonl)
             self.report_logger = ReportLogger(report_id)
             self.report_logger.log_start(
                 simulation_id=self.simulation_id,
@@ -1594,16 +1597,16 @@ class ReportAgent:
                 simulation_requirement=self.simulation_requirement
             )
             
-            # Initialize console logslogger（console_log.txt）
+            # Plain-text console capture (console_log.txt)
             self.console_logger = ReportConsoleLogger(report_id)
             
             ReportManager.update_progress(
-                report_id, "pending", 0, "Initializereport...",
+                report_id, "pending", 0, "Initializing report...",
                 completed_sections=[]
             )
             ReportManager.save_report(report)
             
-            # phase1: planoutline
+            # Phase 1: outline planning
             report.status = ReportStatus.PLANNING
             ReportManager.update_progress(
                 report_id, "planning", 5, "Start planning report outline...",
@@ -1622,24 +1625,25 @@ class ReportAgent:
             )
             report.outline = outline
             
-            # recordplancompletion log
+            # Log planning completion
             self.report_logger.log_planning_complete(outline.to_dict())
             
-            # saveoutlinetofile
+            # Persist outline
             ReportManager.save_outline(report_id, outline)
             ReportManager.update_progress(
-                report_id, "planning", 15, f"Outline planning completed, total{len(outline.sections)}sections",
+                report_id, "planning", 15,
+                f"Outline planning completed, {len(outline.sections)} section(s)",
                 completed_sections=[]
             )
             ReportManager.save_report(report)
             
-            logger.info(f"outlinesavedtofile: {report_id}/outline.json")
+            logger.info(f"Outline saved: {report_id}/outline.json")
             
-            # Phase 2: Sequentially generate sectionsgeneration (per sectionsave）
+            # Phase 2: generate sections sequentially (save after each)
             report.status = ReportStatus.GENERATING
             
             total_sections = len(outline.sections)
-            generated_sections = []  # savecontentfor context
+            generated_sections = []  # prior sections for LLM context
             
             for i, section in enumerate(outline.sections):
                 section_num = i + 1
@@ -1801,7 +1805,7 @@ class ReportAgent:
         try:
             report = ReportManager.get_report_by_simulation(self.simulation_id)
             if report and report.markdown_content:
-                # limitReportlength，avoid overly long context
+                # Cap report length to keep prompts bounded
                 report_content = report.markdown_content[:15000]
                 if len(report.markdown_content) > 15000:
                     report_content += "\n\n... [reportcontenthasTruncate] ..."
@@ -1810,7 +1814,7 @@ class ReportAgent:
         
         system_prompt = CHAT_SYSTEM_PROMPT_TEMPLATE.format(
             simulation_requirement=self.simulation_requirement,
-            report_content=report_content if report_content else "（nonereport）",
+            report_content=report_content if report_content else "(no report yet)",
             tools_description=self._get_tools_description(),
         )
 
@@ -1827,7 +1831,7 @@ class ReportAgent:
             "content": message
         })
         
-        # ReACT loop（simplified version）
+        # ReACT loop (simplified)
         tool_calls_made = []
         max_iterations = 2  # reduce iterations
         
@@ -1841,7 +1845,7 @@ class ReportAgent:
             tool_calls = self._parse_tool_calls(response)
             
             if not tool_calls:
-                # noTool call，directlyReturnresponse
+                # No tool call; return model text
                 clean_response = re.sub(r'<tool_call>.*?</tool_call>', '', response, flags=re.DOTALL)
                 clean_response = re.sub(r'\[TOOL_CALL\].*?\)', '', clean_response)
                 
@@ -1851,7 +1855,7 @@ class ReportAgent:
                     "sources": [tc.get("parameters", {}).get("query", "") for tc in tool_calls_made]
                 }
             
-            # Execute toolcall（limitcount）
+            # Run tool (respect per-turn limit) 
             tool_results = []
             for call in tool_calls[:1]:  # at mostExecute1 time tool call
                 if len(tool_calls_made) >= self.MAX_TOOL_CALLS_PER_CHAT:
@@ -1871,7 +1875,7 @@ class ReportAgent:
                 "content": observation + CHAT_OBSERVATION_SUFFIX
             })
         
-        # Reachedmaximum iteration，Getfinalresponse
+        # Max iterations: take last model reply
         final_response = self.llm.chat(
             messages=messages,
             temperature=0.5
@@ -1890,96 +1894,79 @@ class ReportAgent:
 
 class ReportManager:
     """
-    ReportManagemanager
-    
-    responsible forReportpersistence storage and retrieval
-    
-    filestructure（perSectionoutput）：
-    reports/
-      {report_id}/
-        meta.json          - Reportmetainformationand status
-        outline.json       - Reportoutline
-        progress.json      - generateProgress
-        section_01.md      - Section 1
-        section_02.md      - Section 2
-        ...
-        full_report.md     - Complete report
+    Persist and load report artifacts under ``uploads/reports/{report_id}/``.
+
+    Typical files: ``meta.json``, ``outline.json``, ``progress.json``,
+    ``section_XX.md``, ``full_report.md``, ``agent_log.jsonl``, ``console_log.txt``.
     """
-    
-    # Reportstorage directory
+
     REPORTS_DIR = os.path.join(Config.UPLOAD_FOLDER, 'reports')
-    
+
     @classmethod
     def _ensure_reports_dir(cls):
-        """ensurereportroot directory exists"""
+        """Ensure the reports root directory exists."""
         os.makedirs(cls.REPORTS_DIR, exist_ok=True)
-    
+
     @classmethod
     def _get_report_folder(cls, report_id: str) -> str:
-        """getreportfolderpath"""
+        """Return the filesystem folder for a report id."""
         return os.path.join(cls.REPORTS_DIR, report_id)
-    
+
     @classmethod
     def _ensure_report_folder(cls, report_id: str) -> str:
-        """ensurereportfolderexists andreturnedpath"""
+        """Create the report folder if needed and return its path."""
         folder = cls._get_report_folder(report_id)
         os.makedirs(folder, exist_ok=True)
         return folder
-    
+
     @classmethod
     def _get_report_path(cls, report_id: str) -> str:
-        """getreportmetainformationfile path"""
+        """Path to ``meta.json``."""
         return os.path.join(cls._get_report_folder(report_id), "meta.json")
-    
+
     @classmethod
     def _get_report_markdown_path(cls, report_id: str) -> str:
-        """getcompletereportMarkdownfile path"""
+        """Path to assembled ``full_report.md``."""
         return os.path.join(cls._get_report_folder(report_id), "full_report.md")
-    
+
     @classmethod
     def _get_outline_path(cls, report_id: str) -> str:
-        """getoutlinefile path"""
+        """Path to ``outline.json``."""
         return os.path.join(cls._get_report_folder(report_id), "outline.json")
-    
+
     @classmethod
     def _get_progress_path(cls, report_id: str) -> str:
-        """getprogressfile path"""
+        """Path to ``progress.json``."""
         return os.path.join(cls._get_report_folder(report_id), "progress.json")
-    
+
     @classmethod
     def _get_section_path(cls, report_id: str, section_index: int) -> str:
-        """getSectionMarkdownfile path"""
+        """Path to a section markdown fragment."""
         return os.path.join(cls._get_report_folder(report_id), f"section_{section_index:02d}.md")
-    
+
     @classmethod
     def _get_agent_log_path(cls, report_id: str) -> str:
-        """get Agent logsfile path"""
+        """Path to structured ``agent_log.jsonl``."""
         return os.path.join(cls._get_report_folder(report_id), "agent_log.jsonl")
-    
+
     @classmethod
     def _get_console_log_path(cls, report_id: str) -> str:
-        """getconsolelogsfile path"""
+        """Path to plain-text ``console_log.txt``."""
         return os.path.join(cls._get_report_folder(report_id), "console_log.txt")
     
     @classmethod
     def get_console_log(cls, report_id: str, from_line: int = 0) -> Dict[str, Any]:
         """
-        Getconsolelogcontent
-        
-        This isReportgenerateduring processconsoleoutputlog（INFO、WARNINGetc），
-        and agent_log.jsonl structured logsdifferent。
-        
+        Return plain-text console capture for a report (stdout/stderr style).
+
+        This is separate from ``agent_log.jsonl`` (structured events).
+
         Args:
-            report_id: ReportID
-            from_line: from which rowrowStartRead（for incrementalGet，0 means from the beginningStart）
-            
+            report_id: Report identifier.
+            from_line: 0-based line offset for incremental reads.
+
         Returns:
-            {
-                "logs": [logrowlist],
-                "total_lines": totalrownumber,
-                "from_line": startrownumber,
-                "has_more": whether there are morelog
-            }
+            Dict with ``logs``, ``total_lines``, ``from_line``, ``has_more``.
         """
         log_path = cls._get_console_log_path(report_id)
         
@@ -1998,46 +1985,32 @@ class ReportManager:
             for i, line in enumerate(f):
                 total_lines = i + 1
                 if i >= from_line:
-                    # keeporiginallogrow，remove trailingrowcharacter
                     logs.append(line.rstrip('\n\r'))
         
         return {
             "logs": logs,
             "total_lines": total_lines,
             "from_line": from_line,
-            "has_more": False  # alreadyReadto the end
+            "has_more": False
         }
-    
+
     @classmethod
     def get_console_log_stream(cls, report_id: str) -> List[str]:
-        """
-        GetCompleteconsolelog（one-timeGetall）
-        
-        Args:
-            report_id: ReportID
-            
-        Returns:
-            logrowlist
-        """
+        """Return the full console log as a list of lines."""
         result = cls.get_console_log(report_id, from_line=0)
         return result["logs"]
     
     @classmethod
     def get_agent_log(cls, report_id: str, from_line: int = 0) -> Dict[str, Any]:
         """
-        Get Agent logcontent
-        
+        Return structured agent log entries (JSONL).
+
         Args:
-            report_id: ReportID
-            from_line: from which rowrowStartRead（for incrementalGet，0 means from the beginningStart）
-            
+            report_id: Report identifier.
+            from_line: 0-based line offset for incremental reads.
+
         Returns:
-            {
-                "logs": [logentrylist],
-                "total_lines": totalrownumber,
-                "from_line": startrownumber,
-                "has_more": whether there are morelog
-            }
+            Dict with ``logs``, ``total_lines``, ``from_line``, ``has_more``.
         """
         log_path = cls._get_agent_log_path(report_id)
         
@@ -2060,43 +2033,30 @@ class ReportManager:
                         log_entry = json.loads(line.strip())
                         logs.append(log_entry)
                     except json.JSONDecodeError:
-                        # skip parsingfailedrow
                         continue
-        
+
         return {
             "logs": logs,
             "total_lines": total_lines,
             "from_line": from_line,
-            "has_more": False  # alreadyReadto the end
+            "has_more": False
         }
-    
+
     @classmethod
     def get_agent_log_stream(cls, report_id: str) -> List[Dict[str, Any]]:
-        """
-        GetComplete Agent log（for one-timeGetall）
-        
-        Args:
-            report_id: ReportID
-            
-        Returns:
-            logentrylist
-        """
+        """Return every structured log entry for a report."""
         result = cls.get_agent_log(report_id, from_line=0)
         return result["logs"]
     
     @classmethod
     def save_outline(cls, report_id: str, outline: ReportOutline) -> None:
-        """
-        saveReportoutline
-        
-        in planningphasecompleteimmediately aftercall
-        """
+        """Write ``outline.json`` after planning completes."""
         cls._ensure_report_folder(report_id)
         
         with open(cls._get_outline_path(report_id), 'w', encoding='utf-8') as f:
             json.dump(outline.to_dict(), f, ensure_ascii=False, indent=2)
         
-        logger.info(f"outlinesaved: {report_id}")
+        logger.info(f"Outline saved: {report_id}")
     
     @classmethod
     def save_section(
@@ -2106,49 +2066,40 @@ class ReportManager:
         section: ReportSection
     ) -> str:
         """
-        savesinglesections
-
-        inEach sectiongeneration completed afterimmediatelycall，implementperSectionoutput
+        Persist one section to ``section_XX.md`` right after it is generated.
 
         Args:
-            report_id: ReportID
-            section_index: Sectionindex（from1Start）
-            section: Sectionobject
+            report_id: Report identifier.
+            section_index: 1-based section index.
+            section: Section payload.
 
         Returns:
-            savefile path
+            Path to the written markdown file.
         """
         cls._ensure_report_folder(report_id)
 
-        # BuildSectionMarkdowncontent - clean possibleduplicatetitle
+        # Build markdown body; strip duplicate headings that echo the section title
         cleaned_content = cls._clean_section_content(section.content, section.title)
         md_content = f"## {section.title}\n\n"
         if cleaned_content:
             md_content += f"{cleaned_content}\n\n"
 
-        # savefile
+        # Write section file
         file_suffix = f"section_{section_index:02d}.md"
         file_path = os.path.join(cls._get_report_folder(report_id), file_suffix)
         with open(file_path, 'w', encoding='utf-8') as f:
             f.write(md_content)
 
-        logger.info(f"Sectionsaved: {report_id}/{file_suffix}")
+        logger.info(f"Section saved: {report_id}/{file_suffix}")
         return file_path
     
     @classmethod
     def _clean_section_content(cls, content: str, section_title: str) -> str:
         """
-        cleanSectioncontent
-        
-        1. removecontentbeginningandSection TitleduplicateMarkdowntitlerow
-        2. convertall ### and below levelstitleconvert toboldtext
-        
-        Args:
-            content: originalcontent
-            section_title: Section Title
-            
-        Returns:
-            after cleaningcontent
+        Normalize section markdown before saving.
+
+        1. Drop leading headings that duplicate the configured section title.
+        2. Turn remaining ``#`` headings into bold lines (system already emits ``##`` title).
         """
         import re
         
@@ -2163,26 +2114,25 @@ class ReportManager:
         for i, line in enumerate(lines):
             stripped = line.strip()
             
-            # Checkwhether isMarkdowntitlerow
+            # Markdown heading line
             heading_match = re.match(r'^(#{1,6})\s+(.+)$', stripped)
             
             if heading_match:
                 level = len(heading_match.group(1))
                 title_text = heading_match.group(2).strip()
                 
-                # Checkwhether isandSection Titleduplicatetitle（skip first5rowwithinduplicate）
+                # Skip duplicate of the injected section title (first few lines only)
                 if i < 5:
                     if title_text == section_title or title_text.replace(' ', '') == section_title.replace(' ', ''):
                         skip_next_empty = True
                         continue
                 
-                # convertallleveltitle（#, ##, ###, ####etc）convert tobold
-                # becauseSection Titleadded by system，contentshould not have anytitle
+                # Downgrade headings to bold (section H2 comes from template)
                 cleaned_lines.append(f"**{title_text}**")
-                cleaned_lines.append("")  # addempty line
+                cleaned_lines.append("")
                 continue
             
-            # if previousrowwas skippedtitle，and currentrowempty，also skip
+            # Collapse blank line after removing duplicate heading
             if skip_next_empty and stripped == '':
                 skip_next_empty = False
                 continue
@@ -2190,14 +2140,14 @@ class ReportManager:
             skip_next_empty = False
             cleaned_lines.append(line)
         
-        # removebeginningempty line
+        # Trim leading blank lines
         while cleaned_lines and cleaned_lines[0].strip() == '':
             cleaned_lines.pop(0)
         
-        # removebeginningseparatorline
+        # Trim leading horizontal rules
         while cleaned_lines and cleaned_lines[0].strip() in ['---', '***', '___']:
             cleaned_lines.pop(0)
-            # meanwhileremoveseparatorline afterempty line
+            # Drop blank lines after removing a rule
             while cleaned_lines and cleaned_lines[0].strip() == '':
                 cleaned_lines.pop(0)
         
@@ -2213,11 +2163,7 @@ class ReportManager:
         current_section: str = None,
         completed_sections: List[str] = None
     ) -> None:
-        """
-        UpdateReportgenerateProgress
-        
-        frontend can getReadprogress.jsonGetrealtimeProgress
-        """
+        """Write ``progress.json`` for polling UIs."""
         cls._ensure_report_folder(report_id)
         
         progress_data = {
@@ -2234,7 +2180,7 @@ class ReportManager:
     
     @classmethod
     def get_progress(cls, report_id: str) -> Optional[Dict[str, Any]]:
-        """getreportgenerateprogress"""
+        """Load ``progress.json`` if it exists."""
         path = cls._get_progress_path(report_id)
         
         if not os.path.exists(path):
@@ -2245,11 +2191,7 @@ class ReportManager:
     
     @classmethod
     def get_generated_sections(cls, report_id: str) -> List[Dict[str, Any]]:
-        """
-        GetalreadygenerateSectionlist
-        
-        ReturnallalreadysaveSectionfileinformation
-        """
+        """List markdown fragments already written for a report."""
         folder = cls._get_report_folder(report_id)
         
         if not os.path.exists(folder):
@@ -2262,7 +2204,7 @@ class ReportManager:
                 with open(file_path, 'r', encoding='utf-8') as f:
                     content = f.read()
 
-                # fromfilename parsingSectionindex
+                # Parse index from section_XX.md
                 parts = filename.replace('.md', '').split('_')
                 section_index = int(parts[1])
 
@@ -2276,49 +2218,35 @@ class ReportManager:
     
     @classmethod
     def assemble_full_report(cls, report_id: str, outline: ReportOutline) -> str:
-        """
-        assembleComplete report
-        
-        fromsaveSectionfileassembleComplete report，and processrowtitleclean
-        """
+        """Concatenate section files, then post-process headings."""
         folder = cls._get_report_folder(report_id)
         
-        # BuildReportheader
+        # Title + summary
         md_content = f"# {outline.title}\n\n"
         md_content += f"> {outline.summary}\n\n"
         md_content += f"---\n\n"
         
-        # sequentiallyReadallSectionfile
+        # Append each section fragment in order
         sections = cls.get_generated_sections(report_id)
         for section_info in sections:
             md_content += section_info["content"]
         
-        # post-processing：clean entireReporttitlequestion
+        # Normalize duplicate headings / extra H3+
         md_content = cls._post_process_report(md_content, outline)
         
-        # saveComplete report
+        # Write full_report.md
         full_path = cls._get_report_markdown_path(report_id)
         with open(full_path, 'w', encoding='utf-8') as f:
             f.write(md_content)
         
-        logger.info(f"completereporthasassemble: {report_id}")
+        logger.info(f"Full report assembled: {report_id}")
         return md_content
     
     @classmethod
     def _post_process_report(cls, content: str, outline: ReportOutline) -> str:
         """
-        post-processingReportcontent
-        
-        1. removeduplicatetitle
-        2. keepReportmain title(#)andSection Title(##)，removeother levelstitle(###, ####etc)
-        3. clean redundantempty lineandseparatorline
-        
-        Args:
-            content: originalReportcontent
-            outline: Reportoutline
-            
-        Returns:
-            after processingcontent
+        Normalize assembled markdown: dedupe headings, keep H1/H2 structure,
+        demote deeper headings to bold, and collapse extra blank lines.
         """
         import re
         
@@ -2326,7 +2254,7 @@ class ReportManager:
         processed_lines = []
         prev_was_heading = False
         
-        # collectoutlineinallSection Title
+        # Known section titles from the outline
         section_titles = set()
         for section in outline.sections:
             section_titles.add(section.title)
@@ -2336,14 +2264,14 @@ class ReportManager:
             line = lines[i]
             stripped = line.strip()
             
-            # Checkwhether istitlerow
+            # Heading line
             heading_match = re.match(r'^(#{1,6})\s+(.+)$', stripped)
             
             if heading_match:
                 level = len(heading_match.group(1))
                 title = heading_match.group(2).strip()
                 
-                # Checkwhether isduplicatetitle（inconsecutive5rowappear the same withincontenttitle）
+                # Drop duplicate heading if it repeats within the last few lines
                 is_duplicate = False
                 for j in range(max(0, len(processed_lines) - 5), len(processed_lines)):
                     prev_line = processed_lines[j].strip()
@@ -2355,43 +2283,38 @@ class ReportManager:
                             break
                 
                 if is_duplicate:
-                    # skipduplicatetitleand subsequentempty line
+                    # Skip duplicate and following blank lines
                     i += 1
                     while i < len(lines) and lines[i].strip() == '':
                         i += 1
                     continue
                 
-                # titlelevel handling：
-                # - # (level=1) onlykeepReportmain title
-                # - ## (level=2) keepSection Title
-                # - ### and below (level>=3) convert toboldtext
-                
                 if level == 1:
                     if title == outline.title:
-                        # keepReportmain title
+                        # Keep document title
                         processed_lines.append(line)
                         prev_was_heading = True
                     elif title in section_titles:
-                        # Section Titleerrorusing#，corrected to##
+                        # Section stored as H1 -> normalize to H2
                         processed_lines.append(f"## {title}")
                         prev_was_heading = True
                     else:
-                        # other first-leveltitleconvert tobold
+                        # Other H1 -> bold
                         processed_lines.append(f"**{title}**")
                         processed_lines.append("")
                         prev_was_heading = False
                 elif level == 2:
                     if title in section_titles or title == outline.title:
-                        # keepSection Title
+                        # Keep real section headings
                         processed_lines.append(line)
                         prev_was_heading = True
                     else:
-                        # nonSectionsecond-leveltitleconvert tobold
+                        # Stray H2 -> bold
                         processed_lines.append(f"**{title}**")
                         processed_lines.append("")
                         prev_was_heading = False
                 else:
-                    # ### and below levelstitleconvert toboldtext
+                    # H3+ -> bold
                     processed_lines.append(f"**{title}**")
                     processed_lines.append("")
                     prev_was_heading = False
@@ -2400,12 +2323,12 @@ class ReportManager:
                 continue
             
             elif stripped == '---' and prev_was_heading:
-                # skiptitlefollowed immediately byseparatorline
+                # Drop horizontal rule directly under a heading
                 i += 1
                 continue
             
             elif stripped == '' and prev_was_heading:
-                # titleafter onlykeeponeempty line
+                # Single blank line after heading
                 if processed_lines and processed_lines[-1].strip() != '':
                     processed_lines.append(line)
                 prev_was_heading = False
@@ -2416,7 +2339,7 @@ class ReportManager:
             
             i += 1
         
-        # cleanconsecutivemultipleempty line（keepat most2)
+        # Collapse runs of blank lines (keep at most two)
         result_lines = []
         empty_count = 0
         for line in processed_lines:
@@ -2432,31 +2355,31 @@ class ReportManager:
     
     @classmethod
     def save_report(cls, report: Report) -> None:
-        """SavereportmetainformationandcompleteReport"""
+        """Persist ``meta.json``, optional outline, and markdown body."""
         cls._ensure_report_folder(report.report_id)
         
-        # savemetainformationJSON
+        # meta.json
         with open(cls._get_report_path(report.report_id), 'w', encoding='utf-8') as f:
             json.dump(report.to_dict(), f, ensure_ascii=False, indent=2)
         
-        # saveoutline
+        # outline.json
         if report.outline:
             cls.save_outline(report.report_id, report.outline)
         
-        # saveCompleteMarkdownReport
+        # full_report.md (when provided)
         if report.markdown_content:
             with open(cls._get_report_markdown_path(report.report_id), 'w', encoding='utf-8') as f:
                 f.write(report.markdown_content)
         
-        logger.info(f"reportsaved: {report.report_id}")
+        logger.info(f"Report saved: {report.report_id}")
     
     @classmethod
     def get_report(cls, report_id: str) -> Optional[Report]:
-        """getreport"""
+        """Load a report by id."""
         path = cls._get_report_path(report_id)
         
         if not os.path.exists(path):
-            # backward compatibleformat：Checkdirectlystored inreportsunder directoryfile
+            # Legacy: flat {id}.json next to folders
             old_path = os.path.join(cls.REPORTS_DIR, f"{report_id}.json")
             if os.path.exists(old_path):
                 path = old_path
@@ -2466,7 +2389,7 @@ class ReportManager:
         with open(path, 'r', encoding='utf-8') as f:
             data = json.load(f)
         
-        # rebuildReportobject
+        # Hydrate outline + sections
         outline = None
         if data.get('outline'):
             outline_data = data['outline']
@@ -2482,7 +2405,7 @@ class ReportManager:
                 sections=sections
             )
         
-        # ifmarkdown_contentempty，attempt tofromfull_report.mdRead
+        # Fallback to on-disk full_report.md
         markdown_content = data.get('markdown_content', '')
         if not markdown_content:
             full_report_path = cls._get_report_markdown_path(report_id)
@@ -2505,17 +2428,17 @@ class ReportManager:
     
     @classmethod
     def get_report_by_simulation(cls, simulation_id: str) -> Optional[Report]:
-        """based onsimulationIDgetreport"""
+        """Find the newest report for a simulation id."""
         cls._ensure_reports_dir()
         
         for item in os.listdir(cls.REPORTS_DIR):
             item_path = os.path.join(cls.REPORTS_DIR, item)
-            # newformat：filefolder
+            # New layout: directory per report
             if os.path.isdir(item_path):
                 report = cls.get_report(item)
                 if report and report.simulation_id == simulation_id:
                     return report
-            # backward compatibleformat：JSONfile
+            # Legacy: single JSON file
             elif item.endswith('.json'):
                 report_id = item[:-5]
                 report = cls.get_report(report_id)
@@ -2526,19 +2449,19 @@ class ReportManager:
     
     @classmethod
     def list_reports(cls, simulation_id: Optional[str] = None, limit: int = 50) -> List[Report]:
-        """columnappearreport"""
+        """List reports, optionally filtered by simulation."""
         cls._ensure_reports_dir()
         
         reports = []
         for item in os.listdir(cls.REPORTS_DIR):
             item_path = os.path.join(cls.REPORTS_DIR, item)
-            # newformat：filefolder
+            # New layout: directory per report
             if os.path.isdir(item_path):
                 report = cls.get_report(item)
                 if report:
                     if simulation_id is None or report.simulation_id == simulation_id:
                         reports.append(report)
-            # backward compatibleformat：JSONfile
+            # Legacy: single JSON file
             elif item.endswith('.json'):
                 report_id = item[:-5]
                 report = cls.get_report(report_id)
@@ -2553,18 +2476,18 @@ class ReportManager:
     
     @classmethod
     def delete_report(cls, report_id: str) -> bool:
-        """Deletereport（entirefolder）"""
+        """Delete report artifacts (folder or legacy files)."""
         import shutil
         
         folder_path = cls._get_report_folder(report_id)
         
-        # newformat：Deleteentirefilefolder
+        # Remove modern directory layout
         if os.path.exists(folder_path) and os.path.isdir(folder_path):
             shutil.rmtree(folder_path)
-            logger.info(f"reportfolderhasDelete: {report_id}")
+            logger.info(f"Report folder deleted: {report_id}")
             return True
         
-        # backward compatibleformat：Deleteseparatefile
+        # Legacy single-file cleanup
         deleted = False
         old_json_path = os.path.join(cls.REPORTS_DIR, f"{report_id}.json")
         old_md_path = os.path.join(cls.REPORTS_DIR, f"{report_id}.md")

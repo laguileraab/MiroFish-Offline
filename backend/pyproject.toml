@@ -10,27 +10,27 @@ authors = [
 ]
 
 dependencies = [
-    # 核心框架
+    # Core web framework
     "flask>=3.0.0",
     "flask-cors>=6.0.0",
-    
-    # LLM 相关
+
+    # LLM (OpenAI-compatible API)
     "openai>=1.0.0",
-    
+
     # Neo4j graph database driver
     "neo4j>=5.15.0",
-    
-    # OASIS 社交媒体模拟
+
+    # OASIS social simulation
     "camel-oasis==0.2.5",
     "camel-ai==0.2.78",
-    
-    # 文件处理
+
+    # File parsing
     "PyMuPDF>=1.24.0",
-    # 编码检测（支持非UTF-8编码的文本文件）
+    # Encoding detection for non-UTF-8 text files
     "charset-normalizer>=3.0.0",
     "chardet>=5.0.0",
-    
-    # 工具库
+
+    # Utilities
     "python-dotenv>=1.0.0",
     "pydantic>=2.0.0",
 ]
