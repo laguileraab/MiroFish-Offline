@@ -606,6 +606,15 @@ class SimulationRunner:
         
         try:
             with open(log_path, 'r', encoding='utf-8') as f:
+                # Guard against log truncation/rotation: if file is smaller
+                # than our last read position, reset to start
+                file_size = os.path.getsize(log_path)
+                if position > file_size:
+                    logger.warning(
+                        f"Log file appears truncated ({file_size} < {position}), "
+                        f"resetting position to 0: {log_path}"
+                    )
+                    position = 0
                 f.seek(position)
                 for line in f:
                     line = line.strip()

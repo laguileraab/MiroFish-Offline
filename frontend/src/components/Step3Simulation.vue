@@ -338,24 +338,38 @@ const redditActionsCount = computed(() => {
   return allActions.value.filter(a => a.platform === 'reddit').length
 })
 
-// Format simulated elapsed time (calculated based on rounds and minutes per round)
-const formatElapsedTime = (currentRound) => {
-  if (!currentRound || currentRound <= 0) return '0h 0m'
-  const totalMinutes = currentRound * props.minutesPerRound
-  const hours = Math.floor(totalMinutes / 60)
-  const minutes = totalMinutes % 60
-  return `${hours}h ${minutes}m`
+// ── Real elapsed time (wall-clock) ──
+const simulationStartTime = ref(null)
+const elapsedSeconds = ref(0)
+let elapsedTimerInterval = null
+
+const startElapsedTimer = () => {
+  if (elapsedTimerInterval) clearInterval(elapsedTimerInterval)
+  simulationStartTime.value = Date.now()
+  elapsedSeconds.value = 0
+  elapsedTimerInterval = setInterval(() => {
+    elapsedSeconds.value = Math.floor((Date.now() - simulationStartTime.value) / 1000)
+  }, 1000)
 }
 
-// Simulated elapsed time for Twitter platform
-const twitterElapsedTime = computed(() => {
-  return formatElapsedTime(runStatus.value.twitter_current_round || 0)
-})
+const stopElapsedTimer = () => {
+  if (elapsedTimerInterval) { clearInterval(elapsedTimerInterval); elapsedTimerInterval = null }
+}
 
-// Simulated elapsed time for Reddit platform
-const redditElapsedTime = computed(() => {
-  return formatElapsedTime(runStatus.value.reddit_current_round || 0)
-})
+const formatRealElapsedTime = () => {
+  const s = elapsedSeconds.value
+  if (s <= 0) return '0h 0m 0s'
+  const h = Math.floor(s / 3600)
+  const m = Math.floor((s % 3600) / 60)
+  const sec = s % 60
+  if (h > 0) return `${h}h ${m}m ${sec}s`
+  if (m > 0) return `${m}m ${sec}s`
+  return `${sec}s`
+}
+
+// Elapsed time display — shared across both platforms (single timer)
+const twitterElapsedTime = computed(() => formatRealElapsedTime())
+const redditElapsedTime = computed(() => formatRealElapsedTime())
 
 // Methods
 const addLog = (msg) => {
@@ -374,6 +388,7 @@ const resetAllState = () => {
   isStarting.value = false
   isStopping.value = false
   stopPolling()  // Stop any existing polling
+  stopElapsedTimer()
 }
 
 // Start simulation
@@ -418,6 +433,7 @@ const doStartSimulation = async () => {
       phase.value = 1
       runStatus.value = res.data
 
+      startElapsedTimer()
       startStatusPolling()
       startDetailPolling()
     } else {
@@ -434,9 +450,13 @@ const doStartSimulation = async () => {
   }
 }
 
-// Stop simulation
+// Stop simulation — with confirmation dialog (Sprint 3 fix 3.4)
 const handleStopSimulation = async () => {
   if (!props.simulationId) return
+
+  if (!window.confirm('Are you sure you want to stop the simulation? This action cannot be undone.')) {
+    return
+  }
 
   isStopping.value = true
   addLog('Stopping simulation...')
@@ -448,6 +468,7 @@ const handleStopSimulation = async () => {
       addLog('✓ Simulation stopped')
       phase.value = 2
       stopPolling()
+      stopElapsedTimer()
       emit('update-status', 'completed')
     } else {
       addLog(`Stop failed: ${res.error || 'Unknown error'}`)
@@ -522,6 +543,7 @@ const fetchRunStatus = async () => {
         addLog('✓ Simulation completed')
         phase.value = 2
         stopPolling()
+        stopElapsedTimer()
         emit('update-status', 'completed')
       }
     }
