@@ -1,98 +1,153 @@
 # Graphiti cutover — MiroFish-Offline
 
-This document is the **integration plan** for replacing the custom **`Neo4jStorage` / `NERExtractor` / `SearchService`** pipeline with **[Graphiti](https://github.com/getzep/graphiti)** (`graphiti-core`) as the **single** writer and query engine for episodic ingest → temporal graph → hybrid retrieval.
+This document is the **integration plan** and **runbook** for the Graphiti-backed memory path: **[Graphiti](https://github.com/getzep/graphiti)** (`graphiti-core`) as the **single** writer and query engine for episodic ingest → temporal graph → hybrid retrieval (when `GRAPH_BACKEND=graphiti`).
 
-**Related:** Phase 15 in [`ZEP_STYLE_MEMORY_ROADMAP.md`](ZEP_STYLE_MEMORY_ROADMAP.md). **Baseline before cutover:** Git branch `checkpoint/pre-graphiti`.
+**Related:** Phase 15 in [`ZEP_STYLE_MEMORY_ROADMAP.md`](ZEP_STYLE_MEMORY_ROADMAP.md). **Baseline before cutover:** Git branch `checkpoint/pre-graphiti`. **Implementation branch:** `feature/graphiti-integration`.
+
+---
+
+## Implementation status (living checklist)
+
+| Area | Status | Notes |
+|------|--------|--------|
+| `GraphitiStorage` implements `GraphStorage` | **Done** | `backend/app/storage/graphiti_storage.py` |
+| Flask `create_app` selects backend | **Done** | `GRAPH_BACKEND=neo4j` vs `graphiti` |
+| Ingest via `add_episode` | **Done** | Text chunks; prior context from DB |
+| Hybrid search via `search_` | **Done** | `COMBINED_HYBRID_SEARCH_RRF` |
+| Reads via Graphiti models | **Done** | `EntityNode`, `EntityEdge`, `EpisodicNode`; partition delete via `clear_data` |
+| `:Graph` registry (name, description, ontology JSON) | **Done** | MiroFish-only; not Graphiti schema |
+| JSON ontology → `entity_types` on ingest | **Done** | `graphiti_ontology.py` → empty Pydantic models + `__doc__`; cache invalidated on `set_ontology` |
+| JSON `relation_types` → Graphiti `edge_types` | **TODO** | Needs `edge_types` / `edge_type_map` mapping; verify prompts |
+| `add_episode_bulk` for job throughput | **TODO** | Optional vs sequential `add_text` |
+| Golden-set / snapshot parity for Graphiti | **TODO** | Extend `scripts/snapshot_golden_counts.py` or add Graphiti-specific counts |
+| Alternate Graphiti backend (FalkorDB / Kuzu) | **TODO** | New driver wiring + env; not started |
 
 ---
 
 ## Principle: one memory engine, no dual-write
 
-- **Do not** run Graphiti and the current custom ingest/search in parallel on the same logical graph (no dual-write “hybrid” of two merge/temporal models).
-- **Do** keep MiroFish orchestration: Flask, projects, chunking policy, job queue, simulations, reports, golden-set scripts, admin metrics — **calling** Graphiti for graph lifecycle, episode ingest, and search.
-- **Expect** **re-ingest** on a clean store: custom `Entity` / `Episode` / `RELATION` data is not Graphiti’s schema (`Entity` / `Episodic` / `RELATES_TO`, etc.). With Neo4j, Graphiti 0.28 partitions graphs by **`group_id`** on nodes/edges inside the configured **`NEO4J_DATABASE`** (default `neo4j`); MiroFish `graph_id` is passed as that `group_id`. Optional separate Neo4j databases are a deployment choice, not required by the current adapter.
+- **Do not** run Graphiti and the custom `Neo4jStorage` pipeline on the **same** logical graph (no dual-write of two merge/temporal models).
+- **Do** keep MiroFish orchestration: Flask, projects, chunking, job queue, simulations, reports, golden-set scripts, admin metrics — all calling **`GraphStorage`**.
+- **Expect** **re-ingest** on a clean store: legacy `RELATION` / `:Episode` layout ≠ Graphiti’s `RELATES_TO` / `:Episodic` layout.
 
 ### Graphiti vs “why Neo4j is still in .env”
 
-**Graphiti is not a database.** It is the temporal graph *engine* (extract, merge, validity, hybrid search). With the default stack, **`graphiti-core` uses Neo4j as its persistence backend** — the same way it can target FalkorDB, Kuzu, or Neptune. So `NEO4J_URI` / `NEO4J_DATABASE` mean “where Graphiti stores its graph,” not “a second competing graph implementation.” To eliminate Neo4j entirely you would run Graphiti on another supported backend and swap the driver in app wiring (not done in this repo yet).
+**Graphiti is not a database.** It is the temporal graph *engine*. With the default stack, **`graphiti-core` uses Neo4j as its persistence backend** (or FalkorDB, Kuzu, Neptune per Graphiti docs). So `NEO4J_URI` / `NEO4J_DATABASE` mean **where Graphiti stores data**, not a second competing implementation. To drop Neo4j as a product, swap in another Graphiti driver — you still need *some* graph store.
 
-**Async:** Graphiti’s public API is `async`. The Flask app stays synchronous; `GraphitiStorage` runs coroutines on one **background event loop** (thread + `run_coroutine_threadsafe`) so the async Neo4j driver stays on a stable loop. You do **not** need async routes unless you migrate to ASGI and can `await` Graphiti directly.
+**Async:** Graphiti’s API is `async`. Flask stays sync; `GraphitiStorage` uses a **background event loop** + `run_coroutine_threadsafe` + a lock so the async Neo4j driver stays on one loop. ASGI (e.g. FastAPI) could `await` Graphiti directly later.
 
-**MiroFish-only data:** Graphiti does not define project registry rows or the JSON ontology blob the UI/builder expect. The adapter keeps minimal **`:Graph`** nodes for name, description, and `ontology_json` — everything else goes through Graphiti (`EntityNode`, `EntityEdge`, `EpisodicNode`, `clear_data`, `search_`, etc.).
+**MiroFish-only data:** Graphiti does not ship project registry rows or the ontology JSON blob the UI expects. The adapter keeps **`:Graph`** nodes; everything else goes through Graphiti APIs.
+
+---
+
+## Prescribed ontology (MiroFish JSON → Graphiti)
+
+MiroFish stores ontology as JSON (`entity_types[]`, `relation_types[]`) on `:Graph`, compatible with [`docs/golden-set/ontology-min.json`](golden-set/ontology-min.json).
+
+**Entity types:** For each `entity_types[].name` / `description`, we build an **empty** Pydantic `BaseModel` subclass whose **`__doc__`** carries the description. That becomes Graphiti’s `entity_types=` map on `add_episode`. Graphiti forbids subclass fields that collide with `EntityNode`’s reserved names — empty models satisfy that.
+
+**Relation types:** Not yet passed as Graphiti `edge_types` / `edge_type_map`; extraction still uses Graphiti defaults for edges until we map `relation_types` safely.
+
+**Cache:** Prescribed models are cached per `graph_id` in memory; **`set_ontology`** and **`delete_graph`** invalidate the cache.
+
+---
+
+## Operational runbook
+
+### Required / common environment variables
+
+| Variable | Role |
+|----------|------|
+| `GRAPH_BACKEND` | `neo4j` (custom pipeline) or `graphiti` |
+| `NEO4J_URI`, `NEO4J_USER`, `NEO4J_PASSWORD` | Graphiti’s Neo4j backend (when using Neo4j driver) |
+| `NEO4J_DATABASE` | Logical DB name (default `neo4j`) |
+| `LLM_API_KEY`, `LLM_BASE_URL`, `LLM_MODEL_NAME` | OpenAI-compatible **chat** API for Graphiti extraction (Ollama/LM Studio often need `LLM_API_KEY=ollama`) |
+| `NER_MAX_OUTPUT_TOKENS` | Passed into Graphiti’s `OpenAIGenericClient` as generation budget |
+| `EMBEDDING_MODEL`, `EMBEDDING_BASE_URL` | OpenAI-compatible **embeddings** (`/v1` appended automatically when missing) |
+| `LLM_INGEST_MAX_CONCURRENT` | When `>0`, feeds `Graphiti(..., max_coroutines=…)` unless `GRAPHITI_MAX_COROUTINES` is set |
+| `GRAPHITI_MAX_COROUTINES` | Optional override for Graphiti internal concurrency |
+| `SEMAPHORE_LIMIT` | Graphiti’s own env (see upstream README); coordinate with ingest concurrency |
+
+See [`.env.example`](../.env.example) for the full list shared with the `neo4j` backend.
+
+### Cutover procedure (staging → prod)
+
+1. **New Neo4j DB or wipe** data that used the custom schema if you previously used `GRAPH_BACKEND=neo4j` on the same database (mixed schemas are unsupported).
+2. Set `GRAPH_BACKEND=graphiti`, restart backend, run **`build_indices`** once (happens on `GraphitiStorage` init).
+3. **Re-create graphs** and **re-ingest** documents (no automatic migration from `RELATION` to `RELATES_TO`).
+4. Smoke: create graph → set ontology → upload / build → `search_graph` from UI or API.
+5. Watch logs for JSON / schema failures from small local LLMs; prefer models that support **structured JSON** for extraction.
+
+### Troubleshooting
+
+| Symptom | Likely cause |
+|---------|----------------|
+| Ingest errors, malformed JSON in logs | Local LLM too small or no `json_schema` / `json_object` support |
+| Empty search results | Wrong `group_id` / `graph_id`, or no ingest yet |
+| `Graph storage initialization failed` | Neo4j down, wrong URI, or `graphiti-core` not installed |
+| Slow ingest | Lower `GRAPHITI_MAX_COROUTINES` / `SEMAPHORE_LIMIT` if rate-limited; or raise if the provider allows |
 
 ---
 
 ## Upstream Zep Cloud SDK → Graphiti (conceptual)
 
-MiroFish-Offline already replaced Zep with `GraphStorage`. For teams comparing **Zep Cloud SDK** calls to **Graphiti**, the mapping is:
-
 | Zep Cloud–style concern | Graphiti direction |
 |-------------------------|-------------------|
-| Create graph / project scope | Graphiti driver + `Graphiti` instance; use **group_id** (or equivalent) to isolate graphs per MiroFish project |
-| Set ontology (entity/relation types) | **Prescribed ontology** via Pydantic models (Graphiti docs / examples) |
-| Add episodes (async batch) | **`add_episode`** (text or structured JSON); concurrency via **`SEMAPHORE_LIMIT`** env (Graphiti README) |
-| Poll processing | Graphiti ingest is **pipeline-oriented**; surface completion via your job layer (existing `TaskManager` / chunk jobs) |
-| Hybrid graph search | Graphiti **hybrid search** (semantic + keyword + graph traversal); reranking options in quickstart |
-| Temporal / invalidation | Graphiti **validity windows** and fact supersession (core product design) |
-| Entity summaries | Graphiti **entity summaries** that evolve over time |
-
-Exact method names and constructors follow the installed **`graphiti-core`** version; pin a version in `requirements.txt` and link to that release’s quickstart.
+| Create graph / project scope | `group_id` = MiroFish `graph_id`; Neo4j = one DB + property partition |
+| Set ontology | `:Graph` JSON + prescribed `entity_types` on `add_episode` (relations TODO) |
+| Add episodes | `add_episode` (text / JSON); optional bulk API |
+| Hybrid search | `search_` + search config recipes |
+| Temporal / invalidation | Built into Graphiti edges (`valid_at` / `invalid_at`) |
 
 ---
 
-## MiroFish `GraphStorage` → Graphiti adapter
+## MiroFish `GraphStorage` → Graphiti adapter (reference)
 
-Today, all graph I/O goes through **`GraphStorage`** (`backend/app/storage/graph_storage.py`). Implement **`GraphitiStorage(GraphStorage)`** (name TBD) that:
+1. **Maps `graph_id`** → Graphiti **`group_id`**.
+2. **Registry** → `set_ontology` / `get_ontology` on **`:Graph`**.
+3. **Ingest** → `add_text` / `add_text_batch` → `add_episode` + optional `entity_types` from ontology.
+4. **Search** → `search_` → normalized `edges` / `nodes` for `GraphToolsService`.
+5. **Reads** → `EntityNode` / `EntityEdge` / `EpisodicNode`; **delete partition** → `clear_data`.
 
-1. **Maps `graph_id`** to Graphiti **`group_id`** (Neo4j provider: same logical database, property-based partition).
-2. **Implements** `set_ontology` / `get_ontology` on **`:Graph`** registry nodes. Mapping JSON ontology → Graphiti **prescribed Pydantic** types at ingest is a follow-up (Graphiti supports `entity_types=` on `add_episode`; not yet wired).
-3. **Implements** `add_text` / `add_text_batch` by enqueueing **episodes** (chunk text + provenance metadata). `wait_for_processing` can remain a compatibility no-op if ingest is synchronous from the caller’s perspective, or tie to task completion.
-4. **Implements** `search` by delegating to Graphiti hybrid search and **normalizing** results into the shapes `GraphToolsService` / `oasis_profile_generator` expect (`edges` / `nodes` lists, fields used in prompts).
-5. **Implements** read APIs (`get_all_nodes`, `get_node_edges`, `get_graph_data`, …) either via **Graphiti query helpers** or **narrow Cypher** against Graphiti’s schema — avoid reintroducing a second extraction path.
-
-**Injection:** `create_app` selects `Neo4jStorage` vs `GraphitiStorage` from config (e.g. `GRAPH_BACKEND=graphiti|neo4j_custom`).
+**Injection:** `create_app` — `GRAPH_BACKEND=graphiti` → `GraphitiStorage`.
 
 ---
 
 ## Environment and dependencies
 
-- **Package:** `graphiti-core` ([PyPI](https://pypi.org/project/graphiti-core/)), version **pinned** after the first green vertical slice.
-- **Neo4j:** Graphiti README currently cites **Neo4j 5.26** (and other backends). MiroFish lists `neo4j>=5.15.0`; **validate** driver and server versions against Graphiti’s supported matrix before production cutover.
-- **LLM / embeddings:** Graphiti defaults to OpenAI; supports other providers and **OpenAI-compatible** endpoints. Small local models may fail **structured output** requirements — align with Phase 9 guidance (extract model quality).
-- **Concurrency:** Graphiti uses **`SEMAPHORE_LIMIT`** for ingest; coordinate with MiroFish **`LLM_INGEST_MAX_CONCURRENT`** so total parallel LLM calls stay within provider limits.
+- **Package:** `graphiti-core` pinned in `backend/requirements.txt` / `pyproject.toml`.
+- **Neo4j:** Graphiti README cites **Neo4j 5.26**; validate against your server before production.
+- **Concurrency:** Align Graphiti `SEMAPHORE_LIMIT` with `LLM_INGEST_MAX_CONCURRENT` / `GRAPHITI_MAX_COROUTINES`.
 
 ---
 
-## What stays in MiroFish (complementary, not duplicated)
+## What stays in MiroFish (complementary)
 
 | Area | Role |
 |------|------|
-| **`docs/golden-set/`**, **`scripts/snapshot_golden_counts.py`** | Regression signals after cutover |
-| **`ingest_metrics`**, **`ingest_counters`**, **`GET .../admin/ingest-stats`** | Ops visibility (may wrap Graphiti stages) |
-| **`TaskManager`**, chunk ingest jobs | UX and backpressure around Graphiti ingest |
-| **`LLMClient`**, Ollama / LM Studio | Shared HTTP client patterns; Graphiti may use its own client config |
-| **Simulations / `graph_memory_updater`** | Still call **`GraphStorage`** only; implementation becomes Graphiti-backed |
-
-**Avoid** reimplementing merge adjudication, temporal invalidation, or hybrid ranking **in parallel** with Graphiti’s built-in behavior — that was the main cost of the pre-Graphiti stack.
+| `docs/golden-set/`, `scripts/snapshot_golden_counts.py` | Regression signals (extend for Graphiti as needed) |
+| `ingest_metrics`, `ingest_counters`, admin ingest-stats | Ops visibility (`Episodic` counts when on Graphiti) |
+| `TaskManager`, chunk jobs | Backpressure / UX around ingest |
+| Simulations / `graph_memory_updater` | Call `GraphStorage` only |
 
 ---
 
-## Rollout sequence (suggested)
+## Rollout sequence
 
-1. **Vertical slice:** one project, `add_text` → Graphiti episode → hybrid `search` → assert golden-set or smoke queries.
-2. **Normalize API:** finish `GraphStorage` methods used by `graph_builder`, `graph_tools`, `entity_reader`, `graph_memory_updater`, `oasis_profile_generator`.
-3. **Flip config** in staging; burn down adapter gaps; **re-ingest** from documents.
-4. **Deprecate** direct use of `NERExtractor` / `SearchService` / custom `neo4j_schema` **for graph memory** (keep or delete after parity tests).
+1. **Vertical slice:** one graph, ingest + search + golden smoke.
+2. **Staging:** full API parity; fix `edge_types` / bulk if needed.
+3. **Production flip:** re-ingest; monitor extraction quality.
+4. **Deprecate** custom NER/search **for graph memory** when parity is proven.
 
 ---
 
 ## Phase 15 task alignment
 
-| Task | Updated intent |
+| Task | Status / intent |
 |------|----------------|
-| **TASK-049** | Implement Graphiti-backed `GraphStorage` and prove ingest + search on golden/smoke data (not only a throwaway spike). |
-| **TASK-050** | Document env vars, Neo4j version, ontology mapping, and operational runbook; remove dual-write options from consideration. |
+| **TASK-049** | **In progress** — `GraphitiStorage` + prescribed entity types; edge types + golden automation remain. |
+| **TASK-050** | **In progress** — this document + `.env.example`; expand with on-call notes as you learn. |
 
 ---
 
-*Last updated: cutover planning doc created alongside branch `feature/graphiti-integration`.*
+*Last updated: extended runbook, implementation checklist, prescribed ontology wiring (`graphiti_ontology.py`).*

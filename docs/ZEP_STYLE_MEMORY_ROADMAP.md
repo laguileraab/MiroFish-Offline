@@ -143,7 +143,7 @@ This document is the **post-migration memory and quality roadmap**. It builds on
 **Canonical plan:** [`docs/graphiti-cutover.md`](graphiti-cutover.md) — Zep SDK → Graphiti mapping, `GraphitiStorage` adapter outline, Neo4j version notes, rollout steps.
 
 - **TASK-049**: Implement `GraphStorage` backed by `graphiti-core`; vertical slice ingest + hybrid search (golden set / smoke).
-- **TASK-050**: Env/runbook, ontology mapping, config flag (`GRAPH_BACKEND` or equivalent); re-ingest strategy for existing deployments.
+- **TASK-050**: Env/runbook in [`docs/graphiti-cutover.md`](graphiti-cutover.md) (expanded); `GRAPH_BACKEND`; JSON → Graphiti `entity_types` wired (`graphiti_ontology.py`); `edge_types` + golden parity still open.
 
 ---
 

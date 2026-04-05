@@ -122,6 +122,8 @@ class GraphitiStorage(GraphStorage):
         self._database = database or getattr(Config, "NEO4J_DATABASE", None) or "neo4j"
 
         self._op_lock = threading.RLock()
+        # graph_id -> prescribed entity_types dict | None (None = learned/default Entity only)
+        self._entity_types_cache: Dict[str, Optional[Dict[str, Any]]] = {}
 
         api_key = Config.LLM_API_KEY or "ollama"
         llm_cfg = LLMConfig(
@@ -279,14 +281,26 @@ class GraphitiStorage(GraphStorage):
             await self._registry_delete(graph_id)
 
         self._run_async(_purge())
+        self._entity_types_cache.pop(graph_id, None)
         logger.info("Deleted graph %s via Graphiti clear_data + registry", graph_id)
 
     def set_ontology(self, graph_id: str, ontology: Dict[str, Any]) -> None:
         oj = json.dumps(ontology, ensure_ascii=False)
         self._run_async(self._registry_set_ontology(graph_id, oj))
+        self._entity_types_cache.pop(graph_id, None)
 
     def get_ontology(self, graph_id: str) -> Dict[str, Any]:
         return self._run_async(self._registry_get_ontology(graph_id))
+
+    def _prescribed_entity_types(self, graph_id: str):
+        """Graphiti ``entity_types`` from registry ontology JSON (cached per graph_id)."""
+        if graph_id not in self._entity_types_cache:
+            from .graphiti_ontology import mirofish_ontology_to_entity_types
+
+            self._entity_types_cache[graph_id] = mirofish_ontology_to_entity_types(
+                self.get_ontology(graph_id)
+            )
+        return self._entity_types_cache[graph_id]
 
     # ------------------------------------------------------------------
     # Ingest — Graphiti episode pipeline; prior context from DB (not RAM)
@@ -304,6 +318,8 @@ class GraphitiStorage(GraphStorage):
         episode_uuid = str(uuid.uuid4())
         name = f"chunk-{episode_uuid[:8]}"
 
+        entity_types = self._prescribed_entity_types(graph_id)
+
         async def _ingest():
             return await self._graphiti.add_episode(
                 name=name,
@@ -314,6 +330,7 @@ class GraphitiStorage(GraphStorage):
                 group_id=graph_id,
                 uuid=episode_uuid,
                 previous_episode_uuids=None,
+                entity_types=entity_types,
             )
 
         try:
