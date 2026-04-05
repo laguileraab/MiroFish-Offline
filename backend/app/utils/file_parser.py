@@ -5,7 +5,7 @@ Supports text extraction from PDF, Markdown, TXT files
 
 import os
 from pathlib import Path
-from typing import List, Optional
+from typing import List
 
 
 def _read_text_with_fallback(file_path: str) -> str:

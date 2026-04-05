@@ -9,6 +9,7 @@ entities and relations from text chunks, guided by the graph's ontology.
 import logging
 from typing import Dict, Any, List, Optional
 
+from ..config import Config
 from ..utils.llm_client import LLMClient
 
 logger = logging.getLogger('mirofish.ner_extractor')
@@ -59,14 +60,19 @@ class NERExtractor:
             ontology: Dict with 'entity_types' and 'relation_types' from graph
 
         Returns:
-            Dict with 'entities' and 'relations' lists:
+            Dict with entities, relations, and flags:
             {
-                "entities": [{"name": str, "type": str, "attributes": dict}],
-                "relations": [{"source": str, "target": str, "type": str, "fact": str}]
+                "entities": [...], "relations": [...],
+                "success": bool, "error": str | None
             }
         """
         if not text or not text.strip():
-            return {"entities": [], "relations": []}
+            return {
+                "entities": [],
+                "relations": [],
+                "success": True,
+                "error": None,
+            }
 
         ontology_desc = self._format_ontology(ontology)
         system_msg = _SYSTEM_PROMPT.format(ontology_description=ontology_desc)
@@ -83,9 +89,12 @@ class NERExtractor:
                 result = self.llm.chat_json(
                     messages=messages,
                     temperature=0.1,  # Low temp for extraction precision
-                    max_tokens=4096,
+                    max_tokens=Config.NER_MAX_OUTPUT_TOKENS,
                 )
-                return self._validate_and_clean(result, ontology)
+                cleaned = self._validate_and_clean(result, ontology)
+                cleaned["success"] = True
+                cleaned["error"] = None
+                return cleaned
 
             except ValueError as e:
                 last_error = e
@@ -101,7 +110,13 @@ class NERExtractor:
         logger.error(
             f"NER extraction failed after {self.max_retries + 1} attempts: {last_error}"
         )
-        return {"entities": [], "relations": []}
+        err_msg = str(last_error) if last_error else "NER extraction failed"
+        return {
+            "entities": [],
+            "relations": [],
+            "success": False,
+            "error": err_msg,
+        }
 
     def _format_ontology(self, ontology: Dict[str, Any]) -> str:
         """Format ontology dict into readable text for the LLM prompt."""

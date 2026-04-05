@@ -6,6 +6,7 @@ Includes: CRUD, NER/RE-based text ingestion, hybrid search, retry logic.
 """
 
 import json
+import re
 import time
 import uuid
 import logging
@@ -29,6 +30,14 @@ from . import neo4j_schema
 logger = logging.getLogger('mirofish.neo4j_storage')
 
 
+def _sanitize_neo4j_label(label: str) -> str:
+    """Restrict dynamic entity-type labels to safe Neo4j identifier syntax."""
+    s = (label or "").strip()
+    if not s or not re.match(r"^[A-Za-z][A-Za-z0-9_]*$", s):
+        raise ValueError(f"Invalid entity type label for Neo4j: {label!r}")
+    return s
+
+
 class Neo4jStorage(GraphStorage):
     """Neo4j CE implementation of the GraphStorage interface."""
 
@@ -48,7 +57,10 @@ class Neo4jStorage(GraphStorage):
         self._password = password or Config.NEO4J_PASSWORD
 
         self._driver = GraphDatabase.driver(
-            self._uri, auth=(self._user, self._password)
+            self._uri,
+            auth=(self._user, self._password),
+            max_connection_pool_size=Config.NEO4J_MAX_CONNECTION_POOL_SIZE,
+            connection_acquisition_timeout=Config.NEO4J_CONNECTION_ACQUISITION_TIMEOUT,
         )
         self._embedding = embedding_service or EmbeddingService()
         self._ner = ner_extractor or NERExtractor()
@@ -278,16 +290,21 @@ class Neo4jStorage(GraphStorage):
                 actual_uuid = self._call_with_retry(session.execute_write, _merge_entity)
                 entity_uuid_map[ename.lower()] = actual_uuid
 
-                # Add entity type label
+                # Add entity type label (sanitized — LLM output must not inject Cypher)
                 if etype and etype != "Entity":
                     try:
-                        def _add_label(tx, _name_lower=ename.lower()):
+                        safe_label = _sanitize_neo4j_label(etype)
+
+                        def _add_label(tx, _name_lower=ename.lower(), _label=safe_label):
                             tx.run(
-                                f"MATCH (n:Entity {{graph_id: $gid, name_lower: $nl}}) SET n:`{etype}`",
+                                f"MATCH (n:Entity {{graph_id: $gid, name_lower: $nl}}) SET n:`{_label}`",
                                 gid=graph_id,
                                 nl=_name_lower,
                             )
+
                         self._call_with_retry(session.execute_write, _add_label)
+                    except ValueError as e:
+                        logger.warning("Skipping dynamic label for '%s': %s", ename, e)
                     except Exception as e:
                         logger.warning(f"Failed to add label '{etype}' to '{ename}': {e}")
 

@@ -1,4 +1,4 @@
-import service, { requestWithRetry } from './index'
+import service, { requestWithRetry, ONTOLOGY_REQUEST_TIMEOUT_MS } from './index'
 
 /**
  * Generate ontology (upload documents and simulation requirements)
@@ -6,16 +6,16 @@ import service, { requestWithRetry } from './index'
  * @returns {Promise}
  */
 export function generateOntology(formData) {
-  return requestWithRetry(() =>
-    service({
-      url: '/api/graph/ontology/generate',
-      method: 'post',
-      data: formData,
-      headers: {
-        'Content-Type': 'multipart/form-data'
-      }
-    })
-  )
+  // No retries: a timeout would otherwise re-submit and start duplicate long LLM jobs
+  return service({
+    url: '/api/graph/ontology/generate',
+    method: 'post',
+    data: formData,
+    timeout: ONTOLOGY_REQUEST_TIMEOUT_MS,
+    headers: {
+      'Content-Type': 'multipart/form-data'
+    }
+  })
 }
 
 /**
@@ -67,4 +67,12 @@ export function getProject(projectId) {
     url: `/api/graph/project/${projectId}`,
     method: 'get'
   })
+}
+
+/**
+ * List projects (paginated). Response includes total, offset, limit, count, data.
+ * @param {Object} params - { limit?, offset? }
+ */
+export function listProjects(params = {}) {
+  return service.get('/api/graph/project/list', { params })
 }

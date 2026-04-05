@@ -8,7 +8,7 @@ import json
 import uuid
 import shutil
 from datetime import datetime
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Tuple
 from enum import Enum
 from dataclasses import dataclass, field, asdict
 from ..config import Config
@@ -195,15 +195,16 @@ class ProjectManager:
         return Project.from_dict(data)
 
     @classmethod
-    def list_projects(cls, limit: int = 50) -> List[Project]:
+    def list_projects(cls, limit: int = 50, offset: int = 0) -> Tuple[List[Project], int]:
         """
-        List all projects
+        List projects with pagination.
 
         Args:
-            limit: Result count limit
+            limit: Max items to return (page size)
+            offset: Number of items to skip from the start of the sorted list
 
         Returns:
-            Project list, sorted by creation time (descending)
+            (page of projects, total count before pagination)
         """
         cls._ensure_projects_dir()
 
@@ -213,10 +214,9 @@ class ProjectManager:
             if project:
                 projects.append(project)
 
-        # Sort by creation time (descending)
         projects.sort(key=lambda p: p.created_at, reverse=True)
-
-        return projects[:limit]
+        total = len(projects)
+        return projects[offset:offset + limit], total
 
     @classmethod
     def delete_project(cls, project_id: str) -> bool:
@@ -249,20 +249,32 @@ class ProjectManager:
 
         Returns:
             File information dictionary {filename, path, size}
+
+        Raises:
+            ValueError: If file extension is not allowed or file is too large
         """
+        ext = os.path.splitext(original_filename)[1].lower().lstrip('.')
+        if ext not in Config.ALLOWED_EXTENSIONS:
+            allowed = ', '.join(sorted(Config.ALLOWED_EXTENSIONS))
+            raise ValueError(
+                f"File type '.{ext}' is not allowed. Allowed types: {allowed}"
+            )
+
         files_dir = cls._get_project_files_dir(project_id)
         os.makedirs(files_dir, exist_ok=True)
 
-        # Generate safe filename
-        ext = os.path.splitext(original_filename)[1].lower()
-        safe_filename = f"{uuid.uuid4().hex[:8]}{ext}"
+        safe_filename = f"{uuid.uuid4().hex[:8]}.{ext}"
         file_path = os.path.join(files_dir, safe_filename)
 
-        # Save file
         file_storage.save(file_path)
 
-        # Get file size
         file_size = os.path.getsize(file_path)
+        if file_size > Config.MAX_CONTENT_LENGTH:
+            os.remove(file_path)
+            max_mb = Config.MAX_CONTENT_LENGTH / (1024 * 1024)
+            raise ValueError(
+                f"File size ({file_size} bytes) exceeds maximum allowed size ({max_mb:.0f}MB)"
+            )
 
         return {
             "original_filename": original_filename,

@@ -96,6 +96,12 @@ class TaskManager:
         with self._task_lock:
             self._tasks[task_id] = task
 
+        # Periodic memory-bound cleanup of finished tasks (fork pattern: short TTL)
+        created = getattr(self, "_tasks_created_count", 0) + 1
+        self._tasks_created_count = created
+        if created % 100 == 0:
+            self.cleanup_old_tasks(max_age_hours=1)
+
         return task_id
 
     def get_task(self, task_id: str) -> Optional[Task]:

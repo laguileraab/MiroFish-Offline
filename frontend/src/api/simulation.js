@@ -68,11 +68,13 @@ export const getSimulationConfigRealtime = (simulationId) => {
 }
 
 /**
- * List all simulations
- * @param {string} projectId - Optional, filter by project ID
+ * List simulations (paginated). Response includes total, offset, limit, count, data.
+ * @param {string} [projectId] - Optional filter by project ID
+ * @param {Object} [options] - { limit?, offset? }
  */
-export const listSimulations = (projectId) => {
-  const params = projectId ? { project_id: projectId } : {}
+export const listSimulations = (projectId, options = {}) => {
+  const params = { ...options }
+  if (projectId) params.project_id = projectId
   return service.get('/api/simulation/list', { params })
 }
 

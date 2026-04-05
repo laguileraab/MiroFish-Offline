@@ -42,6 +42,14 @@ def create_app(config_class=Config):
     # Enable CORS
     CORS(app, resources={r"/api/*": {"origins": "*"}})
 
+    # Rate limiting — only when not in DEBUG (local dev keeps FLASK_DEBUG=True)
+    if not app.config.get('DEBUG', False):
+        from .utils.rate_limiter import init_rate_limiter
+        rate_limit_rpm = int(os.environ.get('RATE_LIMIT_RPM', '120'))
+        init_rate_limiter(app, requests_per_minute=rate_limit_rpm)
+        if should_log_startup:
+            logger.info("Rate limiter initialized (%d req/min per IP)", rate_limit_rpm)
+
     # --- Initialize Neo4jStorage singleton (DI via app.extensions) ---
     from .storage import Neo4jStorage
     try:

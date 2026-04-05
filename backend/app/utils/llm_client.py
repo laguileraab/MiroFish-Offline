@@ -8,6 +8,7 @@ import json
 import os
 import re
 from typing import Optional, Dict, Any, List
+from urllib.parse import urlparse
 from openai import OpenAI
 
 from ..config import Config
@@ -21,7 +22,7 @@ class LLMClient:
         api_key: Optional[str] = None,
         base_url: Optional[str] = None,
         model: Optional[str] = None,
-        timeout: float = 300.0
+        timeout: Optional[float] = None,
     ):
         self.api_key = api_key or Config.LLM_API_KEY
         self.base_url = base_url or Config.LLM_BASE_URL
@@ -30,10 +31,11 @@ class LLMClient:
         if not self.api_key:
             raise ValueError("LLM_API_KEY not configured")
 
+        effective_timeout = timeout if timeout is not None else Config.LLM_HTTP_TIMEOUT_SEC
         self.client = OpenAI(
             api_key=self.api_key,
             base_url=self.base_url,
-            timeout=timeout,
+            timeout=effective_timeout,
         )
 
         # Ollama context window size — prevents prompt truncation.
@@ -41,8 +43,23 @@ class LLMClient:
         self._num_ctx = int(os.environ.get('OLLAMA_NUM_CTX', '8192'))
 
     def _is_ollama(self) -> bool:
-        """Check if we're talking to an Ollama server."""
-        return '11434' in (self.base_url or '')
+        """
+        True when the backend should send Ollama-specific options (e.g. num_ctx).
+
+        Uses LLM_PROVIDER=ollama to force, or URL heuristics (default port 11434).
+        LM Studio and other OpenAI-compatible servers on other ports stay False unless forced.
+        """
+        provider = (os.environ.get('LLM_PROVIDER') or '').strip().lower()
+        if provider == 'ollama':
+            return True
+        if provider in ('openai', 'lm_studio', 'lmstudio', 'vllm', 'custom'):
+            return False
+
+        base = self.base_url or ''
+        if '11434' in base:
+            return True
+        parsed = urlparse(base if base.startswith(('http://', 'https://')) else f'http://{base}')
+        return parsed.port == 11434
 
     def chat(
         self,
@@ -79,7 +96,18 @@ class LLMClient:
                 "options": {"num_ctx": self._num_ctx}
             }
 
-        response = self.client.chat.completions.create(**kwargs)
+        try:
+            response = self.client.chat.completions.create(**kwargs)
+        except Exception as first_err:
+            # LM Studio and some OpenAI-compatible servers reject response_format json_object
+            if response_format and "response_format" in kwargs:
+                kwargs_retry = {k: v for k, v in kwargs.items() if k != "response_format"}
+                try:
+                    response = self.client.chat.completions.create(**kwargs_retry)
+                except Exception:
+                    raise first_err from None
+            else:
+                raise first_err
         content = response.choices[0].message.content
         # Some models (like MiniMax M2.5) include <think>thinking content in response, need to remove
         content = re.sub(r'<think>[\s\S]*?</think>', '', content).strip()

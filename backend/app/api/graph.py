@@ -8,7 +8,7 @@ import traceback
 import threading
 from flask import request, jsonify, current_app
 
-from . import graph_bp
+from . import graph_bp, safe_error_response
 from ..config import Config
 from ..services.ontology_generator import OntologyGenerator
 from ..services.graph_builder import GraphBuilderService
@@ -62,15 +62,23 @@ def get_project(project_id: str):
 @graph_bp.route('/project/list', methods=['GET'])
 def list_projects():
     """
-    List all projects
+    List all projects (paginated).
+
+    Query params:
+        limit: max items (default 50)
+        offset: skip this many items (default 0)
     """
     limit = request.args.get('limit', 50, type=int)
-    projects = ProjectManager.list_projects(limit=limit)
-    
+    offset = request.args.get('offset', 0, type=int)
+    projects, total = ProjectManager.list_projects(limit=limit, offset=offset)
+
     return jsonify({
         "success": True,
         "data": [p.to_dict() for p in projects],
-        "count": len(projects)
+        "count": len(projects),
+        "total": total,
+        "offset": offset,
+        "limit": limit,
     })
 
 
@@ -255,11 +263,7 @@ def generate_ontology():
         })
         
     except Exception as e:
-        return jsonify({
-            "success": False,
-            "error": str(e),
-            "traceback": traceback.format_exc()
-        }), 500
+        return safe_error_response(e, 500)
 
 
 # ============== Interface 2: Build Graph ==============
@@ -507,11 +511,7 @@ def build_graph():
         })
         
     except Exception as e:
-        return jsonify({
-            "success": False,
-            "error": str(e),
-            "traceback": traceback.format_exc()
-        }), 500
+        return safe_error_response(e, 500)
 
 
 # ============== Task Query Interface ==============
@@ -567,11 +567,7 @@ def get_graph_data(graph_id: str):
         })
 
     except Exception as e:
-        return jsonify({
-            "success": False,
-            "error": str(e),
-            "traceback": traceback.format_exc()
-        }), 500
+        return safe_error_response(e, 500)
 
 
 @graph_bp.route('/delete/<graph_id>', methods=['DELETE'])
@@ -590,8 +586,4 @@ def delete_graph(graph_id: str):
         })
 
     except Exception as e:
-        return jsonify({
-            "success": False,
-            "error": str(e),
-            "traceback": traceback.format_exc()
-        }), 500
+        return safe_error_response(e, 500)
